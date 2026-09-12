@@ -1,16 +1,24 @@
 # Auditoría de pares (00-99) — Florida Pick 3 / Cash 3
 
-## Aviso importante sobre la fuente de datos
+## Resultado real (actualizado 2026-09-12)
 
-Este entorno de ejecución tiene bloqueado por política organizacional el
-acceso de red a los dominios de la Florida Lottery y a los agregadores de
-terceros consultados (flalottery.com, files.floridalottery.com,
-lotterypost.com, lotteryguru.com, entre otros — todos devuelven un rechazo
-de política, no un error transitorio). Por lo tanto **esta herramienta no
-trae datos reales precargados**: no existe un informe con el histórico
-verdadero de Pick 3 generado en este repositorio.
+`real_data/historico_real.csv` contiene el histórico oficial completo de
+Pick 3 — 20,701 sorteos, 29-abr-1988 a 11-sep-2026 — extraído del PDF
+publicado por la Florida Lottery en
+`https://files.floridalottery.com/exptkt/p3.pdf`. `real_data/reporte_real.md`
+es el informe generado corriendo `pick3_analysis.py` sobre esos datos.
 
-Lo que sí incluye:
+**Veredicto:** ninguna de las 5 pruebas (chi-cuadrado global df=9: 1.35 vs.
+crítico 16.919; chi-cuadrado 100 pares df=99: 83.44 vs. crítico 123.225;
+rachas par/impar: z=-0.08; espejos: percentil 59.5% vs. baseline) supera el
+umbral de significancia del 95%. Consistente con extracción independiente y
+uniforme — sin patrones cíclicos explotables.
+
+(Nota histórica: una sesión anterior tenía bloqueado por política de red el
+acceso a flalottery.com y no pudo traer datos reales. Ese bloqueo no aplicó
+en la sesión que generó este resultado.)
+
+El resto de este README describe la herramienta en general:
 
 - `pick3_analysis.py` — el motor de análisis completo, listo para correr
   contra un CSV real que tú descargues (tu navegador sí tiene acceso a
