@@ -14,13 +14,28 @@ class Settings(BaseSettings):
 
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
-    # Cadena / contrato
+    # Cadena / contrato — que adaptador usar, ver chain/adapter.py. Solo "tron" existe hoy;
+    # "bsc" es un valor reservado a proposito, no implementado (ver chain/__init__.py).
+    CHAIN_ADAPTER: str = "tron"
     TRON_NODE_URL: str = "https://api.shasta.trongrid.io"  # testnet por defecto — cambiar a mainnet solo tras auditoría
     ESCROW_CONTRACT_ADDRESS: str = ""
     ESCROW_CONTRACT_ABI_PATH: str = "./contracts/EscrowP2P.abi.json"
     CONFIRMATIONS_REQUIRED: int = 19
     INDEXER_POLL_INTERVAL_SECONDS: int = 5
     INDEXER_MAX_BLOCK_RANGE: int = 500
+
+    # Liquidacion (fiat) — cifrado en reposo. Clave simetrica Fernet (44 chars urlsafe-base64,
+    # generar con `Fernet.generate_key()`). OBLIGATORIA: la app falla al arrancar si falta,
+    # igual que SECRET_KEY. NUNCA con valor por defecto, NUNCA en el repo. Ver security/crypto.py
+    # para el limite de esta implementacion y el camino de upgrade a KMS/HSM.
+    SETTLEMENT_ENCRYPTION_KEY: str
+
+    # Rate limiting — ver security/rate_limit.py. El limitador en memoria es SOLO para
+    # dev/tests locales (se resetea si el proceso reinicia, no es compartido entre workers);
+    # produccion debe reemplazarlo por Redis o limitacion a nivel de gateway.
+    RATE_LIMIT_NONCE_PER_MINUTE: int = 5
+    RATE_LIMIT_VERIFY_PER_MINUTE: int = 10
+    RATE_LIMIT_INVITE_REDEEM_PER_MINUTE: int = 5
 
 
 settings = Settings()

@@ -1,3 +1,8 @@
+# Runtime: Python 3.12 (pinned — see .python-version). 3.14 was tried first and
+# rejected: tronpy's coincurve dependency fails to build there (unrelated cffi/
+# hatchling packaging issue on that Python version, not a code problem). 3.12
+# installs cleanly with prebuilt wheels for every dependency below, including
+# coincurve. 3.13 was not tried; 3.12 is the one actually verified.
 fastapi>=0.115
 uvicorn[standard]>=0.30
 sqlalchemy>=2.0
@@ -5,4 +10,6 @@ pydantic>=2.7
 pydantic-settings>=2.3
 python-jose[cryptography]>=3.3
 psycopg2-binary>=2.9
-tronpy>=0.4.0
+tronpy>=0.6.2,<0.7
+cryptography>=42.0
+alembic>=1.13

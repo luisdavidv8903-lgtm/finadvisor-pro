@@ -41,3 +41,14 @@ python -m indexer
 ```
 
 El contrato (`contracts/EscrowP2P.sol`) se compila y despliega con Hardhat/TronBox — no incluido aquí. Antes de deployar a mainnet: (1) auditoría de seguridad profesional, (2) pruebas de volumen real en Shasta testnet, (3) `owner`/`arbiter` configurados como multisig, nunca EOAs sueltas.
+
+## Contrato — toolchain local (compilación + tests, sin deploy)
+
+```bash
+cd chambeando
+npm install
+npx hardhat compile   # genera contracts/EscrowP2P.abi.json a partir del ABI compilado
+npx hardhat test      # corre el suite de tests contra la red local de Hardhat
+```
+
+Usa `@openzeppelin/tron-contracts` (pineado, ver `package.json`) para `Ownable`, `ReentrancyGuard` y, sobre todo, `SafeTRC20.safeTransferChecked` — necesario porque USDT-TRON devuelve `false` en un `transfer()` que en realidad tuvo éxito; ver el comentario en `EscrowP2P.sol` y los tests en `test/EscrowP2P.test.js` bajo "USDT-TRON transfer() return-value quirk". La red de pruebas es la red local EVM de Hardhat, no un nodo TRON real — suficiente para validar la lógica de negocio del contrato, pero no sustituye una validación posterior en Shasta testnet (fuera de alcance de esta fase, que es solo local, sin deploy).

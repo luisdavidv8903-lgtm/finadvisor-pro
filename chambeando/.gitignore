@@ -1,0 +1,14 @@
+node_modules/
+artifacts/
+cache/
+coverage/
+coverage.json
+
+# backend (Python)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+backend/.env
+backend/.env.*

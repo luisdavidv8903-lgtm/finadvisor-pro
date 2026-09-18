@@ -1,6 +1,6 @@
 """
 Worker independiente (proceso separado del API server) que sincroniza el
-estado del contrato EscrowP2P hacia P2POrderDB.onchain_status.
+estado del contrato EscrowP2P hacia P2POrderDB.
 
 Reglas de diseño (ver security-audits/chambeando para el porqué):
   - Idempotente: reprocesar el mismo evento dos veces no debe duplicar nada.
@@ -8,7 +8,10 @@ Reglas de diseño (ver security-audits/chambeando para el porqué):
     proceso se reinicia, retoma exactamente donde quedó.
   - Solo avanza hasta (head - CONFIRMATIONS_REQUIRED) para no reaccionar a
     eventos que un reorg todavía podría revertir.
-  - onchain_status es escrito EXCLUSIVAMENTE aquí, nunca desde un endpoint.
+  - onchain_status, arbiter_snapshot_wallet, was_disputed y confirmed_block se
+    escriben EXCLUSIVAMENTE aqui, nunca desde un endpoint.
+  - Solo habla con la cadena a traves de EscrowChainAdapter (chain/) — nunca
+    importa tronpy directamente (ver seccion 5 del informe de Phase 2B).
 
 Correr como: `python -m chambeando.backend.indexer` (loop infinito) o como
 un cronjob/servicio systemd separado del proceso uvicorn de la API.
@@ -19,7 +22,7 @@ import time
 
 from sqlalchemy.orm import Session
 
-from .chain import ChainEvent, get_chain_client
+from .chain import ChainEvent, get_chain_adapter
 from .config import settings
 from .database import SessionLocal
 from .models import IndexerCheckpointDB, OrderStatus, P2POrderDB
@@ -36,16 +39,12 @@ _EVENT_TO_STATUS = {
 }
 
 
-def _get_or_create_checkpoint(db: Session) -> IndexerCheckpointDB:
+def _get_or_create_checkpoint(db: Session, contract_identity: str) -> IndexerCheckpointDB:
     checkpoint = (
-        db.query(IndexerCheckpointDB)
-        .filter(IndexerCheckpointDB.contract_address == settings.ESCROW_CONTRACT_ADDRESS)
-        .first()
+        db.query(IndexerCheckpointDB).filter(IndexerCheckpointDB.contract_address == contract_identity).first()
     )
     if checkpoint is None:
-        checkpoint = IndexerCheckpointDB(
-            contract_address=settings.ESCROW_CONTRACT_ADDRESS, last_processed_block=0
-        )
+        checkpoint = IndexerCheckpointDB(contract_address=contract_identity, last_processed_block=0)
         db.add(checkpoint)
         db.commit()
         db.refresh(checkpoint)
@@ -70,21 +69,31 @@ def _apply_event(db: Session, event: ChainEvent) -> None:
                 confirmed_block=event.block_number,
             )
         )
+        # flush (no commit) para que eventos MAS TARDE en este MISMO batch (p.ej. un
+        # OrderClaimed del mismo orderId, si cayeron en el mismo rango de bloques)
+        # puedan encontrar esta fila via query — la sesion usa autoflush=False
+        # (SessionLocal en database.py), asi que sin este flush explicito la fila
+        # queda invisible a queries hasta el commit final de run_indexer_once().
+        db.flush()
         return
 
     if event.name == "OrderClaimed":
         order = db.query(P2POrderDB).filter(P2POrderDB.onchain_order_id == event.order_id).first()
         if order:
             order.buyer_wallet = event.data.get("buyer", order.buyer_wallet)
+            # arbiterSnapshot se fija en el contrato en claimOrder() (Phase 2A.1) — el
+            # indexer solo espeja lo que el evento ya trae, nunca lo calcula.
+            order.arbiter_snapshot_wallet = event.data.get("arbiterSnapshot", order.arbiter_snapshot_wallet)
 
     if event.name == "OrderSettled":
         order = db.query(P2POrderDB).filter(P2POrderDB.onchain_order_id == event.order_id).first()
         if order:
-            recipient = event.data.get("recipient", "")
-            # si el destinatario final fue el comprador, se completó normalmente;
-            # si fue el vendedor (recipient == seller_wallet), fue un REFUNDED por disputa.
+            # Phase 2A.1: el contrato escribe RELEASED/REFUNDED explicitamente (evento
+            # trae `finalStatus`) — el indexer YA NO infiere el estado comparando
+            # `recipient` contra `seller_wallet`, solo espeja lo que el contrato dijo.
+            final_status = event.data.get("finalStatus")
             order.onchain_status = (
-                OrderStatus.COMPLETED if recipient != order.seller_wallet else OrderStatus.REFUNDED
+                OrderStatus.RELEASED if str(final_status) in ("4", "RELEASED") else OrderStatus.REFUNDED
             )
             order.confirmed_block = event.block_number
         return
@@ -104,14 +113,17 @@ def _apply_event(db: Session, event: ChainEvent) -> None:
         return
     order.onchain_status = new_status
     order.confirmed_block = event.block_number
+    if event.name == "DisputeRaised":
+        order.was_disputed = True  # una vez True, nunca vuelve a False (ver models.py)
 
 
 def run_indexer_once() -> None:
-    client = get_chain_client()
+    adapter = get_chain_adapter()
     db = SessionLocal()
     try:
-        checkpoint = _get_or_create_checkpoint(db)
-        chain_head = client.current_block()
+        contract_identity = adapter.get_contract_identity()
+        checkpoint = _get_or_create_checkpoint(db, contract_identity)
+        chain_head = adapter.current_block()
         safe_head = chain_head - settings.CONFIRMATIONS_REQUIRED
 
         from_block = checkpoint.last_processed_block + 1
@@ -120,7 +132,7 @@ def run_indexer_once() -> None:
 
         to_block = min(safe_head, from_block + settings.INDEXER_MAX_BLOCK_RANGE)
 
-        events = client.get_events(from_block, to_block)
+        events = adapter.get_events(from_block, to_block)
         for event in events:
             _apply_event(db, event)
 
@@ -136,7 +148,7 @@ def run_indexer_once() -> None:
 
 def run_forever() -> None:
     logging.basicConfig(level=logging.INFO)
-    logger.info("Indexer iniciado, contrato=%s", settings.ESCROW_CONTRACT_ADDRESS)
+    logger.info("Indexer iniciado, adaptador=%s", settings.CHAIN_ADAPTER)
     while True:
         run_indexer_once()
         time.sleep(settings.INDEXER_POLL_INTERVAL_SECONDS)

@@ -1,0 +1,20 @@
+{
+  "name": "chambeando",
+  "version": "1.0.0",
+  "description": "Pivote respecto al MVP original auditado en `security-audits/chambeando/`: Chambeando deja de tocar rieles fiat/bancarios por completo. Las transferencias son wallet-to-wallet en USDT-TRC20 (Tron), con el escrow viviendo en un smart contract, no en la base de datos de Chambeando. El pie fiat (comprador paga al vendedor por Zelle/transferencia/efectivo) ocurre fuera de la plataforma, entre las partes — igual que HeavenEx.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@openzeppelin/tron-contracts": "5.6.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "5.0.0",
+    "hardhat": "2.29.1"
+  }
+}
