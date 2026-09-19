@@ -30,15 +30,27 @@ def _files_importing_tronpy() -> list[pathlib.Path]:
 
 
 def test_no_tronpy_imports_outside_tron_adapter():
-    """La regla es sobre logica de NEGOCIO, no sobre el propio test suite:
-    tests/test_tron_signature_real.py (Phase 2B.1 #6) importa tronpy real a
-    proposito para probar la criptografia real contra vectores sinteticos — eso
-    es exactamente lo que ese archivo existe para hacer, no una violacion de la
+    """La regla es sobre logica de NEGOCIO, no sobre el propio test suite (ni
+    sobre herramientas de demo que deliberadamente simulan una wallet
+    cliente): tests/test_tron_signature_real.py (Phase 2B.1 #6) importa
+    tronpy real a proposito para probar la criptografia real contra vectores
+    sinteticos. Phase 2C anade tres archivos mas en la misma categoria --
+    test_e2e_full_flow.py, test_e2e_postgres.py y demo_e2e.py necesitan
+    GENERAR keypairs y FIRMAR mensajes como lo haria una wallet real (algo
+    que EscrowChainAdapter nunca modela -- el adapter solo VERIFICA firmas
+    del lado servidor, nunca las genera), para que las identidades sinteticas
+    de Phase 2C sean crypto real de punta a punta. Ninguno de los tres es
+    codigo de negocio (routers/services/models/auth.py siguen sin poder
+    importar tronpy) -- son exactamente la misma excepcion que
+    test_tron_signature_real.py ya establecio, no una violacion de la
     separacion chain-agnostic del backend en si."""
     offenders = _files_importing_tronpy()
     allowed = {
         BACKEND_ROOT / "chain" / "tron_adapter.py",
         BACKEND_ROOT / "tests" / "test_tron_signature_real.py",
+        BACKEND_ROOT / "tests" / "test_e2e_full_flow.py",
+        BACKEND_ROOT / "tests" / "test_e2e_postgres.py",
+        BACKEND_ROOT / "demo_e2e.py",
     }
     unexpected = [p for p in offenders if p not in allowed]
     assert unexpected == [], f"tronpy imported outside the Tron adapter (or the real-crypto test): {unexpected}"
