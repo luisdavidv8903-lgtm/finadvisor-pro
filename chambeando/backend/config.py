@@ -37,5 +37,16 @@ class Settings(BaseSettings):
     RATE_LIMIT_VERIFY_PER_MINUTE: int = 10
     RATE_LIMIT_INVITE_REDEEM_PER_MINUTE: int = 5
 
+    # WhatsApp (Phase 2C, sandbox only) — see WHATSAPP_ARCHITECTURE.md. Safe
+    # sandbox defaults on purpose (unlike SECRET_KEY/SETTLEMENT_ENCRYPTION_KEY,
+    # which fail closed): there is no production Meta app in this phase, so
+    # requiring a real secret here would block local sandbox use for nothing.
+    # A real deployment MUST override both via env before going anywhere near
+    # a real Meta webhook.
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = "sandbox-verify-token-never-use-in-production"
+    WHATSAPP_APP_SECRET: str = "sandbox-app-secret-never-use-in-production"
+    WHATSAPP_LINK_TOKEN_EXPIRE_SECONDS: int = 600
+    RATE_LIMIT_WHATSAPP_MESSAGE_PER_MINUTE: int = 20
+
 
 settings = Settings()

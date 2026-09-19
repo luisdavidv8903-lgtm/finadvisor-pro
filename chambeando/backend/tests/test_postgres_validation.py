@@ -240,6 +240,28 @@ def test_invalid_enum_rejected(pg_session):
     pg_session.rollback()
 
 
+def test_every_security_event_type_member_is_insertable(pg_session):
+    """POSTGRES_VERIFIED regression test: Phase 2C found that adding a new
+    Python SecurityEventType member (WHATSAPP_ACCOUNT_LINKED) does NOT
+    retroactively update the already-created native Postgres ENUM type or
+    SQLite CHECK constraint — a real Alembic-migrated database rejected it
+    with "invalid input value for enum securityeventtype" until a dedicated
+    migration step (989d2c51d5ca) added the value to both dialects. This
+    test would have caught that drift immediately: every current
+    SecurityEventType member must be a value the MIGRATED schema (not
+    create_all()) actually accepts."""
+    from backend.models import SecurityEventDB, SecurityEventType, UserDB
+
+    user = UserDB(wallet_address="TFakePgEnumDriftCheck00001")
+    pg_session.add(user)
+    pg_session.commit()
+
+    for action in SecurityEventType:
+        event = SecurityEventDB(actor_user_id=user.id, action=action)
+        pg_session.add(event)
+        pg_session.commit()
+
+
 # ---------------------------------------------------------------------------
 # Settlement encryption + snapshot
 # ---------------------------------------------------------------------------

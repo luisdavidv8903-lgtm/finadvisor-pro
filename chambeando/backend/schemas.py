@@ -280,3 +280,30 @@ class SecurityEventOut(BaseModel):
     target_id: str | None
     reason: str | None
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp sandbox (Phase 2C) — see WHATSAPP_ARCHITECTURE.md. The inbound
+# webhook envelope below is a deliberately SIMPLIFIED synthetic shape, not
+# Meta's real deeply-nested Cloud API payload — parsing the real envelope is
+# listed as a remaining blocker before a genuine Meta sandbox integration.
+# ---------------------------------------------------------------------------
+
+
+class WhatsAppInboundMessage(BaseModel):
+    message_id: str = Field(min_length=1, max_length=128)
+    from_whatsapp_id: str = Field(min_length=1, max_length=64)
+    text: str = Field(default="", max_length=4096)
+
+
+class WhatsAppWebhookPayload(BaseModel):
+    messages: list[WhatsAppInboundMessage] = Field(default_factory=list)
+
+
+class WhatsAppLinkRequest(BaseModel):
+    link_token: str = Field(min_length=1, max_length=128)
+
+
+class WhatsAppLinkResponse(BaseModel):
+    whatsapp_id: str
+    linked: bool

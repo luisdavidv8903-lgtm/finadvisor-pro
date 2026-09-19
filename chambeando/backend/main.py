@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .routers import admin, auth, disputes, invites, orders, reports, settlement, users
+from .routers import admin, auth, disputes, invites, orders, reports, settlement, users, whatsapp
 
 # El esquema de la base de datos lo gestiona Alembic (ver backend/alembic/),
 # NO create_all() — Phase 2B.1. Correr `alembic upgrade head` antes de
@@ -27,6 +27,7 @@ app.include_router(settlement.router)
 app.include_router(disputes.router)
 app.include_router(reports.router)
 app.include_router(users.router)
+app.include_router(whatsapp.router)
 
 
 @app.get("/")

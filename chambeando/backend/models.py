@@ -55,6 +55,24 @@ class OrderStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ConversationState(str, Enum):
+    """Server-side WhatsApp conversation state (Phase 2C section 7: WhatsApp
+    message history is never authoritative product state -- this table is).
+    Deliberately small and linear: this is a sandbox interaction layer, not a
+    second business state machine (order/dispute state stays in P2POrderDB,
+    only referenced here by id)."""
+
+    IDLE = "idle"
+    AWAITING_LINK = "awaiting_link"
+    AWAITING_INVITE_CODE = "awaiting_invite_code"
+    MENU = "menu"
+    BUY_SELECT_OFFER = "buy_select_offer"
+    SELL_AWAITING_AMOUNT = "sell_awaiting_amount"
+    SELL_AWAITING_RATE = "sell_awaiting_rate"
+    SELL_AWAITING_CONFIRM = "sell_awaiting_confirm"
+    DISPUTE_SELECT_TRADE = "dispute_select_trade"
+
+
 class SecurityEventType(str, Enum):
     AUTH_FAILURE = "auth_failure"
     AUTH_SUCCESS = "auth_success"
@@ -76,6 +94,7 @@ class SecurityEventType(str, Enum):
     REPORT_REVIEWED = "report_reviewed"
     RATE_LIMIT_TRIGGERED = "rate_limit_triggered"
     ADMIN_BOOTSTRAPPED = "admin_bootstrapped"
+    WHATSAPP_ACCOUNT_LINKED = "whatsapp_account_linked"
 
 
 class UserDB(Base):
@@ -297,3 +316,61 @@ class SecurityEventDB(Base):
     target_id = Column(String, nullable=True)
     reason = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+
+
+class WhatsAppLinkDB(Base):
+    """Maps an opaque WhatsApp identity (WA's own user id -- never the raw
+    phone number is required to be stored, and never used as a trust
+    signal) to a Chambeando UserDB -- but ONLY after that user proved wallet
+    ownership through the normal nonce/signature flow (auth.py), same as any
+    other login. Phase 2C section 5's rule, enforced by construction: a
+    WhatsAppLinkDB row existing (whatsapp_id known) never implies user_id is
+    set, and user_id being set never implies membership -- that is still a
+    separate MembershipDB row, redeemed the normal way. Three independent
+    facts, three independent columns/tables, exactly as documented in
+    WHATSAPP_ARCHITECTURE.md.
+
+    link_token_hash/link_token_expires_at hold a short-lived, single-use,
+    hashed (never plaintext) token for the deep-link handoff to the wallet-
+    signing page -- same hash-not-plaintext discipline as InviteDB.code_hash."""
+
+    __tablename__ = "whatsapp_links"
+    id = Column(Integer, primary_key=True, index=True)
+    whatsapp_id = Column(String, unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    link_token_hash = Column(String, nullable=True, index=True)
+    link_token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    linked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+
+
+class ConversationSessionDB(Base):
+    """Server-side conversation state per WhatsApp identity (see
+    ConversationState). `context` is a small opaque JSON string (e.g. which
+    synthetic offer numbers map to which real order ids for THIS session) --
+    never raw settlement data, never a private key, never full wallets."""
+
+    __tablename__ = "conversation_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    whatsapp_id = Column(String, unique=True, index=True, nullable=False)
+    state = Column(SQLEnum(ConversationState, create_constraint=True, validate_strings=True), nullable=False, default=ConversationState.IDLE)
+    context = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=timeutils.utcnow, onupdate=timeutils.utcnow)
+
+
+class ProcessedWebhookEventDB(Base):
+    """DB-ENFORCED idempotency for inbound webhook delivery (Phase 2C section
+    6/7: duplicate webhook delivery must be a no-op). The unique constraint
+    is the actual guarantee -- a second INSERT for the same
+    (provider, message_id) raises IntegrityError, which the webhook handler
+    catches and treats as 'already processed', never a second time
+    processing the same inbound event (same DB-enforced-uniqueness pattern
+    as InviteDB.code_hash / UserDB.wallet_address elsewhere in this schema)."""
+
+    __tablename__ = "processed_webhook_events"
+    __table_args__ = (UniqueConstraint("provider", "message_id", name="uq_webhook_event_provider_message"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    provider = Column(String, nullable=False, default="whatsapp")
+    message_id = Column(String, nullable=False)
+    processed_at = Column(DateTime(timezone=True), default=timeutils.utcnow)

@@ -168,3 +168,35 @@ def test_enum_columns_have_db_level_check_constraints(alembic_config):
             conn.commit()
     finally:
         conn.close()
+
+
+def test_every_security_event_type_member_is_insertable_on_a_migrated_db(alembic_config):
+    """Regression test for a real Phase 2C bug: adding a new
+    SecurityEventType member in models.py does NOT retroactively update the
+    CHECK constraint a real `alembic upgrade head` produces (that constraint
+    was frozen with its original member list back in the initial migration,
+    and only a dedicated migration step can widen it) — invisible against
+    create_all(), which always regenerates the CHECK from the current model.
+    This caught WHATSAPP_ACCOUNT_LINKED being rejected until migration
+    989d2c51d5ca explicitly added it on both dialects."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.models import SecurityEventDB, SecurityEventType, UserDB
+
+    cfg, db_path = alembic_config
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        user = UserDB(wallet_address="Tsynthetic0EnumDriftCheck00001")
+        session.add(user)
+        session.commit()
+        for action in SecurityEventType:
+            session.add(SecurityEventDB(actor_user_id=user.id, action=action))
+            session.commit()
+    finally:
+        session.close()
+        engine.dispose()
