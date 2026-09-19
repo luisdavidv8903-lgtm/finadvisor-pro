@@ -394,7 +394,21 @@ def test_duplicate_webhook_during_whatsapp_flow_is_noop(client, db_session, fake
 
     router, mock = wa
     reset_rate_limiter_for_tests()
-    body = json.dumps({"messages": [{"message_id": "e2e-dup-1", "from_whatsapp_id": "wa-e2e-dup-1", "text": "START"}]}).encode()
+    body = json.dumps(
+        {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "id": "TEST_WABA_ID",
+                    "changes": [
+                        {
+                            "field": "messages",
+                            "value": {"messages": [{"id": "wamid.e2edup1", "from": "wa-e2e-dup-1", "type": "text", "text": {"body": "START"}}]}},
+                    ],
+                }
+            ],
+        }
+    ).encode()
     signature = "sha256=" + hmac.new(settings.WHATSAPP_APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
 
     first = client.post("/whatsapp/webhook", content=body, headers={"Content-Type": "application/json", "X-Hub-Signature-256": signature})

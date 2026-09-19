@@ -37,16 +37,26 @@ class Settings(BaseSettings):
     RATE_LIMIT_VERIFY_PER_MINUTE: int = 10
     RATE_LIMIT_INVITE_REDEEM_PER_MINUTE: int = 5
 
-    # WhatsApp (Phase 2C, sandbox only) — see WHATSAPP_ARCHITECTURE.md. Safe
-    # sandbox defaults on purpose (unlike SECRET_KEY/SETTLEMENT_ENCRYPTION_KEY,
-    # which fail closed): there is no production Meta app in this phase, so
-    # requiring a real secret here would block local sandbox use for nothing.
-    # A real deployment MUST override both via env before going anywhere near
-    # a real Meta webhook.
-    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = "sandbox-verify-token-never-use-in-production"
+    # WhatsApp (Phase 2C/2D.1) — see WHATSAPP_ARCHITECTURE.md. Safe sandbox
+    # defaults on purpose for the verify token/app secret (unlike
+    # SECRET_KEY/SETTLEMENT_ENCRYPTION_KEY, which fail closed): there is no
+    # production Meta app configured by default, so requiring a real secret
+    # here would block local sandbox use for nothing. A real deployment MUST
+    # override these via env before going anywhere near a real Meta webhook.
+    WHATSAPP_VERIFY_TOKEN: str = "sandbox-verify-token-never-use-in-production"
     WHATSAPP_APP_SECRET: str = "sandbox-app-secret-never-use-in-production"
     WHATSAPP_LINK_TOKEN_EXPIRE_SECONDS: int = 600
     RATE_LIMIT_WHATSAPP_MESSAGE_PER_MINUTE: int = 20
+
+    # Phase 2D.1: config-driven provider selection — NEVER auto-detected from
+    # "are credentials present" (that would silently start using a real Meta
+    # transport the moment someone exports an env var for local testing).
+    # "sandbox" (default) -> SandboxMetaClient, never touches the network.
+    # "meta" -> MetaCloudWhatsAppClient, requires the three fields below.
+    WHATSAPP_PROVIDER: str = "sandbox"
+    WHATSAPP_ACCESS_TOKEN: str | None = None
+    WHATSAPP_PHONE_NUMBER_ID: str | None = None
+    WHATSAPP_GRAPH_API_VERSION: str = "v21.0"
 
 
 settings = Settings()

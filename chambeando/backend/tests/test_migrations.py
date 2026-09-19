@@ -170,6 +170,30 @@ def test_enum_columns_have_db_level_check_constraints(alembic_config):
         conn.close()
 
 
+def test_running_a_migration_does_not_disable_preexisting_app_loggers(alembic_config):
+    """Regression test for a real Phase 2D.1 bug: alembic/env.py's
+    `fileConfig(config.config_file_name)` defaulted to
+    `disable_existing_loggers=True` (the stdlib default), which silently set
+    `.disabled = True` on every `chambeando.*` logger already created before
+    the migration ran -- e.g. `chambeando.whatsapp.meta_client` -- dropping
+    every future `.error()`/`.info()` call on it as a no-op for the rest of
+    the process, regardless of level/propagation/handlers. Found via a real
+    test failure (test_meta_cloud_client.py's sanitized-logging test passed
+    alone but failed whenever it ran after ANY test that had already
+    triggered a real `alembic upgrade head`). Fixed by passing
+    `disable_existing_loggers=False`."""
+    import logging
+
+    logger_name = "chambeando.some_preexisting_test_logger"
+    logger = logging.getLogger(logger_name)
+    assert logger.disabled is False
+
+    cfg, db_path = alembic_config
+    command.upgrade(cfg, "head")
+
+    assert logger.disabled is False
+
+
 def test_every_security_event_type_member_is_insertable_on_a_migrated_db(alembic_config):
     """Regression test for a real Phase 2C bug: adding a new
     SecurityEventType member in models.py does NOT retroactively update the

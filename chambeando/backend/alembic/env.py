@@ -33,8 +33,20 @@ config.set_main_option("sqlalchemy.url", _os.environ.get("DATABASE_URL", setting
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# disable_existing_loggers=False is NOT optional here (found empirically,
+# Phase 2D.1): logging.config.fileConfig() defaults to True, which silently
+# sets `.disabled = True` on every logger that already exists at this point
+# and isn't explicitly listed in alembic.ini's [loggers] section -- that
+# includes every `chambeando.*` app logger already created by whatever
+# imported this env.py (e.g. `chambeando.whatsapp.meta_client`,
+# `chambeando.indexer`). A disabled logger drops every future call
+# (`.error()`, `.info()`, ...) as a silent no-op for the rest of the
+# process, regardless of level/propagation/handlers -- a real production
+# risk anywhere `alembic upgrade head` runs in the same process as the app
+# (e.g. a startup migration hook), not just a test artifact.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

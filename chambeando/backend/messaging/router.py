@@ -64,10 +64,25 @@ def _get_context(session: ConversationSessionDB) -> dict:
         return {}
 
 
+SAFE_HANDOFF_DISABLED_TEXT = "El enlace seguro de firma de wallet todavia no esta habilitado en este entorno. Probalo de nuevo mas adelante."
+
+
 class ConversationRouter:
-    def __init__(self, adapter: MessagingAdapter, dapp_base_url: str = "https://chambeando.local/app") -> None:
+    def __init__(
+        self,
+        adapter: MessagingAdapter,
+        dapp_base_url: str = "https://chambeando.local/app",
+        wallet_handoff_enabled: bool = True,
+    ) -> None:
         self._adapter = adapter
         self._dapp_base_url = dapp_base_url
+        # Phase 2D.1 section 11: keep the real wallet-signing handoff
+        # disabled whenever there is no genuine HTTPS Chambeando test
+        # endpoint to send the user to -- messaging/__init__.py sets this to
+        # False whenever settings.WHATSAPP_PROVIDER == "meta" (no real dApp
+        # URL is configured yet). Sandbox/test construction defaults to True
+        # (the placeholder domain is harmless there).
+        self._wallet_handoff_enabled = wallet_handoff_enabled
 
     # --- transport-agnostic entrypoint -----------------------------------
 
@@ -110,6 +125,16 @@ class ConversationRouter:
 
     def _send(self, whatsapp_id: str, text: str, action_url: str | None = None) -> None:
         self._adapter.send(OutboundMessage(to=whatsapp_id, text=text, action_url=action_url))
+
+    def _send_handoff(self, whatsapp_id: str, intro_text: str, url: str) -> None:
+        """Every deep-link (wallet-signing, claim, create-order, dispute)
+        goes through here -- section 11: if wallet handoff isn't enabled
+        (no real HTTPS endpoint configured), reply with a safe explanatory
+        message instead of a link that would go nowhere real."""
+        if not self._wallet_handoff_enabled:
+            self._send(whatsapp_id, SAFE_HANDOFF_DISABLED_TEXT)
+            return
+        self._send(whatsapp_id, intro_text, action_url=url)
 
     def _set_state(self, db: Session, session: ConversationSessionDB, state: ConversationState, context: dict | None = None) -> None:
         session.state = state
@@ -155,10 +180,10 @@ class ConversationRouter:
             token = identity.issue_link_token(db, whatsapp_id, settings.WHATSAPP_LINK_TOKEN_EXPIRE_SECONDS)
             link_url = f"{self._dapp_base_url}/link?token={token}"
             self._set_state(db, session, ConversationState.AWAITING_LINK, context={})
-            self._send(
+            self._send_handoff(
                 whatsapp_id,
                 "Primero necesitamos verificar tu wallet (nunca compartas tu clave privada). Abri este link para firmar:",
-                action_url=link_url,
+                link_url,
             )
             return
 
@@ -260,7 +285,7 @@ class ConversationRouter:
         )
         link_url = f"{self._dapp_base_url}/claim?order_id={order.id}"
         self._set_state(db, session, ConversationState.MENU, context={})
-        self._send(whatsapp_id, summary, action_url=link_url)
+        self._send_handoff(whatsapp_id, summary, link_url)
 
     # --- SELL ---------------------------------------------------------------
 
@@ -302,10 +327,10 @@ class ConversationRouter:
         context = _get_context(session)
         link_url = f"{self._dapp_base_url}/create-order?amount={context.get('amount')}&fiat={context.get('fiat_amount')}"
         self._set_state(db, session, ConversationState.MENU, context={})
-        self._send(
+        self._send_handoff(
             whatsapp_id,
             "Para publicar tu oferta necesitas firmar la transaccion de escrow con tu wallet. Abri este link:",
-            action_url=link_url,
+            link_url,
         )
 
     @staticmethod
@@ -371,10 +396,10 @@ class ConversationRouter:
 
         link_url = f"{self._dapp_base_url}/dispute?order_id={order.id}"
         self._set_state(db, session, ConversationState.MENU, context={})
-        self._send(
+        self._send_handoff(
             whatsapp_id,
             "Para abrir la disputa y enviar evidencia usa la pagina segura -- nunca compartas evidencia por este chat.",
-            action_url=link_url,
+            link_url,
         )
 
 

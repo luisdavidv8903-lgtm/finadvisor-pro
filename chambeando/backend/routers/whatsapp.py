@@ -12,7 +12,7 @@ way security/audit.py never logs a sensitive VALUE, only WHO/WHAT/WHEN.
 """
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,9 +21,10 @@ from ..database import get_db
 from ..deps import get_current_user
 from ..messaging import get_conversation_router
 from ..messaging.identity import LinkTokenError, consume_link_token
+from ..messaging.meta_envelope import MetaWebhookEnvelope, parse_meta_webhook_envelope
 from ..messaging.whatsapp_adapter import verify_webhook_signature, verify_webhook_subscription
 from ..models import ProcessedWebhookEventDB, SecurityEventType, UserDB
-from ..schemas import WhatsAppLinkRequest, WhatsAppLinkResponse, WhatsAppWebhookPayload
+from ..schemas import WhatsAppLinkRequest, WhatsAppLinkResponse
 from ..security.audit import log_security_event
 from ..security.rate_limit import RateLimiter, enforce_rate_limit, get_rate_limiter
 
@@ -33,13 +34,19 @@ router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 
 
 @router.get("/webhook")
-def verify_subscription(hub_mode: str | None = None, hub_verify_token: str | None = None, hub_challenge: str | None = None):
+def verify_subscription(
+    hub_mode: str | None = Query(default=None, alias="hub.mode"),
+    hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
+    hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
+):
     """The one-time GET handshake Meta performs when registering a webhook
-    URL. Query params use Meta's own dotted names (hub.mode etc.) -- FastAPI
-    cannot bind a dotted name to a Python identifier, so this sandbox route
-    uses the underscore spelling; a real deployment's edge/proxy config maps
-    hub.mode -> hub_mode (documented as a remaining blocker, see report)."""
-    if not verify_webhook_subscription(hub_mode, hub_verify_token, settings.WHATSAPP_WEBHOOK_VERIFY_TOKEN):
+    URL. Meta sends the real dotted query param names (hub.mode,
+    hub.verify_token, hub.challenge) -- FastAPI can bind a dotted query
+    param to a normal Python identifier via Query(alias=...), which is what
+    happens here; no proxy/edge rewrite is needed. The verify token itself
+    is never echoed back in any response (only hub_challenge, which is not
+    secret -- Meta generates it per-handshake specifically to be echoed)."""
+    if not verify_webhook_subscription(hub_mode, hub_verify_token, settings.WHATSAPP_VERIFY_TOKEN):
         raise HTTPException(status_code=403, detail="Verificacion de webhook fallida")
     return Response(content=hub_challenge or "", media_type="text/plain")
 
@@ -50,6 +57,9 @@ async def receive_webhook(
     db: Session = Depends(get_db),
     limiter: RateLimiter = Depends(get_rate_limiter),
 ):
+    # Signature verification happens against the EXACT raw bytes Meta sent,
+    # before any JSON parsing/transformation could alter what's being
+    # verified (Phase 2D.1 section 5) -- request.body() is the raw payload.
     raw_body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256")
     if not verify_webhook_signature(settings.WHATSAPP_APP_SECRET, raw_body, signature):
@@ -58,21 +68,29 @@ async def receive_webhook(
         raise HTTPException(status_code=403, detail="Firma de webhook invalida")
 
     try:
-        payload = WhatsAppWebhookPayload.model_validate_json(raw_body)
+        envelope = MetaWebhookEnvelope.model_validate_json(raw_body)
     except ValueError:
         raise HTTPException(status_code=400, detail="Payload de webhook invalido")
+
+    # `statuses` (delivery/read receipts for messages WE sent) live in the
+    # SAME envelope but are never surfaced here — parse_meta_webhook_envelope
+    # only ever returns genuine inbound user messages, never a status event
+    # mistaken for one (section 6).
+    inbound_messages = parse_meta_webhook_envelope(envelope)
 
     router_instance = get_conversation_router()
     processed = 0
     duplicates = 0
 
-    for message in payload.messages:
-        enforce_rate_limit(limiter, f"whatsapp-inbound:{message.from_whatsapp_id}", settings.RATE_LIMIT_WHATSAPP_MESSAGE_PER_MINUTE)
+    for message in inbound_messages:
+        enforce_rate_limit(limiter, f"whatsapp-inbound:{message.whatsapp_id}", settings.RATE_LIMIT_WHATSAPP_MESSAGE_PER_MINUTE)
 
         # DB-ENFORCED idempotency: the unique constraint on (provider, message_id)
         # is the actual guarantee, not this Python check -- a genuine race
         # between two webhook deliveries for the same message_id still can't
-        # both win (see models.py's ProcessedWebhookEventDB docstring).
+        # both win (see models.py's ProcessedWebhookEventDB docstring). Meta's
+        # own message id (wamid...) is the external idempotency key, exactly
+        # as section 6 specifies -- no separate id is generated here.
         event = ProcessedWebhookEventDB(provider="whatsapp", message_id=message.message_id)
         db.add(event)
         try:
@@ -83,7 +101,7 @@ async def receive_webhook(
             logger.info("whatsapp webhook: duplicate message_id, skipped")
             continue
 
-        router_instance.handle_inbound(db, message.from_whatsapp_id, message.text)
+        router_instance.handle_inbound(db, message.whatsapp_id, message.text)
         processed += 1
 
     logger.info("whatsapp webhook: processed=%s duplicates=%s", processed, duplicates)

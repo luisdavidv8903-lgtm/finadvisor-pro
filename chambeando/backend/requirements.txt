@@ -13,3 +13,4 @@ psycopg2-binary>=2.9
 tronpy>=0.6.2,<0.7
 cryptography>=42.0
 alembic>=1.13
+httpx>=0.27  # Phase 2D.1: real Meta WhatsApp Cloud API outbound client (messaging/whatsapp_adapter.py)
