@@ -95,6 +95,12 @@ class SecurityEventType(str, Enum):
     RATE_LIMIT_TRIGGERED = "rate_limit_triggered"
     ADMIN_BOOTSTRAPPED = "admin_bootstrapped"
     WHATSAPP_ACCOUNT_LINKED = "whatsapp_account_linked"
+    TELEGRAM_IDENTITY_REGISTERED = "telegram_identity_registered"
+    TELEGRAM_MEMBERSHIP_SUSPENDED = "telegram_membership_suspended"
+    TELEGRAM_MEMBERSHIP_REACTIVATED = "telegram_membership_reactivated"
+    TELEGRAM_OFFER_CREATED = "telegram_offer_created"
+    TELEGRAM_OFFER_MATCHED = "telegram_offer_matched"
+    TELEGRAM_OFFER_STATUS_CHANGED = "telegram_offer_status_changed"
 
 
 class UserDB(Base):
@@ -354,6 +360,125 @@ class ConversationSessionDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     whatsapp_id = Column(String, unique=True, index=True, nullable=False)
     state = Column(SQLEnum(ConversationState, create_constraint=True, validate_strings=True), nullable=False, default=ConversationState.IDLE)
+    context = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=timeutils.utcnow, onupdate=timeutils.utcnow)
+
+
+class Channel(str, Enum):
+    """Extensible on purpose (WhatsApp could migrate to this later), but only
+    TELEGRAM is used in V1 -- WhatsAppLinkDB stays untouched and unrelated."""
+
+    TELEGRAM = "telegram"
+
+
+class OfferSide(str, Enum):
+    COMPRO = "compro"
+    VENDO = "vendo"
+
+
+class OfferStatus(str, Enum):
+    """Off-chain coordination state for a Telegram offer -- NOT OrderStatus.
+    P2POfferDB never implies custody, escrow, or an on-chain order; this enum
+    exists so that distinction can never be blurred by reusing OrderStatus."""
+
+    OPEN = "open"
+    MATCHED = "matched"
+    PAYMENT_PENDING = "payment_pending"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    DISPUTED = "disputed"
+
+
+class TelegramConversationState(str, Enum):
+    """Telegram-specific conversation states -- deliberately separate from
+    ConversationState (WhatsApp's), which is full of wallet/dApp-handoff
+    states that do not apply here (no wallet, no escrow in V1)."""
+
+    IDLE = "idle"
+    MENU = "menu"
+    OFFER_AMOUNT = "offer_amount"
+    OFFER_CURRENCY = "offer_currency"
+    OFFER_RATE = "offer_rate"
+    OFFER_SETTLEMENT_METHOD = "offer_settlement_method"
+    OFFER_SETTLEMENT_LOCATION = "offer_settlement_location"
+    OFFER_CONFIRM = "offer_confirm"
+    MATCH_SELECT = "match_select"
+    MY_OFFERS_SELECT = "my_offers_select"
+    OFFER_ACTION_SELECT = "offer_action_select"
+    CANCEL_CONFIRM = "cancel_confirm"
+
+
+class ChannelIdentityDB(Base):
+    """Channel-agnostic identity anchor. `user_id` is nullable and unused by
+    V1 (Telegram membership never requires wallet proof) -- it exists so a
+    future unification ("this Telegram identity IS this WhatsApp/wallet
+    user") is a single UPDATE here, never a data migration or a second
+    identity table. WhatsAppLinkDB is untouched; it keeps mapping WhatsApp
+    ids on its own for as long as the WhatsApp integration exists."""
+
+    __tablename__ = "channel_identities"
+    __table_args__ = (UniqueConstraint("channel", "channel_user_id", name="uq_channel_identity"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    channel = Column(SQLEnum(Channel, create_constraint=True, validate_strings=True), nullable=False)
+    channel_user_id = Column(String, nullable=False, index=True)  # opaque per-channel id (Telegram numeric user id, as string)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+
+
+class TelegramMembershipDB(Base):
+    """Same role/status shape as MembershipDB (MemberRole/MembershipStatus
+    reused as-is), but keyed off ChannelIdentityDB instead of a wallet-proven
+    UserDB -- access to the private Telegram group/bot never requires wallet
+    proof in V1. Moderation V1 is direct suspend/reactivate here; there is no
+    report/appeal/queue model (explicitly out of scope)."""
+
+    __tablename__ = "telegram_memberships"
+    __table_args__ = (UniqueConstraint("channel_identity_id", name="uq_telegram_membership_identity"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    channel_identity_id = Column(Integer, ForeignKey("channel_identities.id"), nullable=False, index=True)
+    role = Column(SQLEnum(MemberRole, create_constraint=True, validate_strings=True), nullable=False, default=MemberRole.MEMBER)
+    status = Column(SQLEnum(MembershipStatus, create_constraint=True, validate_strings=True), nullable=False, default=MembershipStatus.ACTIVE)
+    joined_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+    suspended_by_channel_identity_id = Column(Integer, ForeignKey("channel_identities.id"), nullable=True)
+    suspended_at = Column(DateTime(timezone=True), nullable=True)
+    suspension_reason = Column(String, nullable=True)
+
+
+class P2POfferDB(Base):
+    """Off-chain COMPRO/VENDO coordination offer. Never custody, never an
+    escrow reference, never a wallet -- `settlement_method` (e.g. "cash",
+    "zelle") and `settlement_location` (e.g. "Havana") are both plain
+    descriptive text, never an account/payment credential (that belongs, for
+    the on-chain flow only, in SettlementDetailDB's encrypted payload -- this
+    table must never grow a similar field)."""
+
+    __tablename__ = "p2p_offers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    channel_identity_id = Column(Integer, ForeignKey("channel_identities.id"), nullable=False, index=True)
+    side = Column(SQLEnum(OfferSide, create_constraint=True, validate_strings=True), nullable=False)
+    amount = Column(Numeric(18, 2), nullable=False)
+    currency = Column(String, nullable=False)
+    rate = Column(Numeric(18, 4), nullable=False)
+    settlement_method = Column(String, nullable=False)
+    settlement_location = Column(String, nullable=False)
+    status = Column(SQLEnum(OfferStatus, create_constraint=True, validate_strings=True), nullable=False, default=OfferStatus.OPEN, index=True)
+    matched_offer_id = Column(Integer, ForeignKey("p2p_offers.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=timeutils.utcnow, onupdate=timeutils.utcnow)
+
+
+class TelegramSessionDB(Base):
+    """Server-side conversation state per Telegram identity -- same role as
+    ConversationSessionDB, kept separate because the state enum and domain
+    (offers, not wallet-signed orders) are entirely different."""
+
+    __tablename__ = "telegram_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    channel_identity_id = Column(Integer, ForeignKey("channel_identities.id"), unique=True, nullable=False, index=True)
+    state = Column(SQLEnum(TelegramConversationState, create_constraint=True, validate_strings=True), nullable=False, default=TelegramConversationState.IDLE)
     context = Column(String, nullable=True)
     updated_at = Column(DateTime(timezone=True), default=timeutils.utcnow, onupdate=timeutils.utcnow)
 

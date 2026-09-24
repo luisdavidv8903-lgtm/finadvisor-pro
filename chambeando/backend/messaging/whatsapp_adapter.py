@@ -138,7 +138,17 @@ class WhatsAppAdapter(MessagingAdapter):
         text = message.text
         if message.action_url:
             text = f"{text}\n{message.action_url}"
-        self._client.send_message(message.to, text)
+        try:
+            self._client.send_message(message.to, text)
+        except MetaApiError:
+            # Best-effort delivery: MessagingAdapter's contract (adapter.py)
+            # is channel-agnostic and callers (ConversationRouter) must never
+            # see a Meta-specific exception -- a failed reply is swallowed
+            # here, not propagated up into the inbound webhook request that
+            # triggered it (which must still ack Meta with 2xx regardless).
+            # MetaClient.send_message already logged the sanitized status/
+            # error_code; nothing more to add except accepting the lost reply.
+            logger.error("WhatsApp outbound send failed; reply not delivered")
 
 
 def verify_webhook_signature(app_secret: str, payload: bytes, signature_header: str | None) -> bool:

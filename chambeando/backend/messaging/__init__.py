@@ -6,6 +6,8 @@ SandboxMetaClient itself; tests inject a fake via set_conversation_router_for_te
 """
 from .adapter import MessagingAdapter, OutboundMessage
 from .router import ConversationRouter
+from .telegram_adapter import RealTelegramClient, SandboxTelegramClient, TelegramAdapter
+from .telegram_router import TelegramConversationRouter
 from .whatsapp_adapter import MetaCloudWhatsAppClient, SandboxMetaClient, WhatsAppAdapter
 
 __all__ = [
@@ -18,9 +20,17 @@ __all__ = [
     "get_conversation_router",
     "set_conversation_router_for_tests",
     "reset_conversation_router_for_tests",
+    "TelegramConversationRouter",
+    "TelegramAdapter",
+    "SandboxTelegramClient",
+    "RealTelegramClient",
+    "get_telegram_router",
+    "set_telegram_router_for_tests",
+    "reset_telegram_router_for_tests",
 ]
 
 _router: ConversationRouter | None = None
+_telegram_router: TelegramConversationRouter | None = None
 
 
 def _build_default_client():
@@ -62,3 +72,30 @@ def set_conversation_router_for_tests(router: ConversationRouter) -> None:
 def reset_conversation_router_for_tests() -> None:
     global _router
     _router = None
+
+
+def _build_default_telegram_client():
+    """Same config-driven-never-inferred rule as _build_default_client
+    above, applied to Telegram's own settings.TELEGRAM_PROVIDER."""
+    from ..config import settings
+
+    if settings.TELEGRAM_PROVIDER == "telegram":
+        return RealTelegramClient(bot_token=settings.TELEGRAM_BOT_TOKEN or "")
+    return SandboxTelegramClient()
+
+
+def get_telegram_router() -> TelegramConversationRouter:
+    global _telegram_router
+    if _telegram_router is None:
+        _telegram_router = TelegramConversationRouter(TelegramAdapter(_build_default_telegram_client()))
+    return _telegram_router
+
+
+def set_telegram_router_for_tests(router: TelegramConversationRouter) -> None:
+    global _telegram_router
+    _telegram_router = router
+
+
+def reset_telegram_router_for_tests() -> None:
+    global _telegram_router
+    _telegram_router = None

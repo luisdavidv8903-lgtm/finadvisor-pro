@@ -17,7 +17,7 @@ from backend.messaging.identity import (
     get_or_create_link,
     issue_link_token,
 )
-from backend.messaging.whatsapp_adapter import SandboxMetaClient, WhatsAppAdapter, verify_webhook_signature, verify_webhook_subscription
+from backend.messaging.whatsapp_adapter import MetaApiError, MetaClient, SandboxMetaClient, WhatsAppAdapter, verify_webhook_signature, verify_webhook_subscription
 from backend.models import UserDB
 
 
@@ -41,6 +41,29 @@ def test_adapter_appends_action_url_to_message_body():
     assert to == "wa-1"
     assert "firma aqui" in text
     assert "https://chambeando.local/app/link?token=abc" in text
+
+
+class _FailingMetaClient(MetaClient):
+    """Always raises MetaApiError, exactly like MetaCloudWhatsAppClient does
+    on a non-2xx Meta response -- used to prove WhatsAppAdapter.send() never
+    lets that propagate into a caller (see whatsapp_adapter.py's send())."""
+
+    def send_message(self, to: str, text: str) -> None:
+        raise MetaApiError("Meta API returned HTTP 500")
+
+
+def test_adapter_swallows_meta_api_error_instead_of_propagating():
+    adapter = WhatsAppAdapter(_FailingMetaClient())
+    adapter.send(OutboundMessage(to="wa-1", text="hola"))  # must not raise
+
+
+def test_adapter_failure_is_logged_safely_without_message_text(caplog):
+    adapter = WhatsAppAdapter(_FailingMetaClient())
+    secret_text = "SYNTHETIC_MARKER_SHOULD_NEVER_BE_LOGGED"
+    with caplog.at_level("ERROR"):
+        adapter.send(OutboundMessage(to="wa-1", text=secret_text))
+    assert secret_text not in caplog.text
+    assert "failed" in caplog.text.lower()
 
 
 # ---------------------------------------------------------------------------

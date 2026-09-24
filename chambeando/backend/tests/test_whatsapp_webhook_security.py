@@ -12,7 +12,7 @@ import pytest
 
 from backend.config import settings
 from backend.messaging import ConversationRouter, WhatsAppAdapter, reset_conversation_router_for_tests, set_conversation_router_for_tests
-from backend.messaging.whatsapp_adapter import SandboxMetaClient
+from backend.messaging.whatsapp_adapter import MetaApiError, MetaClient, SandboxMetaClient
 from backend.models import ProcessedWebhookEventDB
 from backend.security.rate_limit import reset_rate_limiter_for_tests
 
@@ -23,6 +23,24 @@ def sandbox_client():
     set_conversation_router_for_tests(ConversationRouter(WhatsAppAdapter(client)))
     reset_rate_limiter_for_tests()
     yield client
+    reset_conversation_router_for_tests()
+
+
+class _FailingMetaClient(MetaClient):
+    """Always raises MetaApiError -- reproduces the real 500 seen from
+    Meta's official webhook test button (send_message.py:126) so the
+    regression (outbound send failure must never crash the inbound webhook
+    response) has a real HTTP-level test, not just the adapter unit test."""
+
+    def send_message(self, to: str, text: str) -> None:
+        raise MetaApiError("Meta API returned HTTP 500")
+
+
+@pytest.fixture()
+def failing_send_client():
+    set_conversation_router_for_tests(ConversationRouter(WhatsAppAdapter(_FailingMetaClient())))
+    reset_rate_limiter_for_tests()
+    yield
     reset_conversation_router_for_tests()
 
 
@@ -340,3 +358,30 @@ def test_webhook_handler_never_logs_message_text(client, sandbox_client, caplog)
     with caplog.at_level("DEBUG"):
         client.post("/whatsapp/webhook", content=body, headers={"Content-Type": "application/json", "X-Hub-Signature-256": _sign(body)})
     assert secret_text not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Outbound send failure must never crash the inbound webhook response
+# (regression: Meta's official test-webhook button triggered a reply send
+# that failed with a real HTTP 500 from Meta's own API, which propagated
+# uncaught and turned the inbound ack itself into a 500 -- Meta would then
+# treat the whole delivery as failed and keep retrying it).
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_still_acks_200_when_outbound_reply_send_fails(client, failing_send_client):
+    body = _envelope("wamid.sendfail1")
+    r = client.post("/whatsapp/webhook", content=body, headers={"Content-Type": "application/json", "X-Hub-Signature-256": _sign(body)})
+    assert r.status_code == 200
+    assert r.json() == {"processed": 1, "duplicates": 0}
+
+
+def test_webhook_marks_event_processed_even_when_reply_send_fails(client, failing_send_client, db_session):
+    """The inbound message itself was legitimately processed (idempotency
+    event recorded, router dispatched) -- only the reply failed to send.
+    Meta must not receive a 500 and redeliver, since redelivery would hit
+    the DB-enforced idempotency check and be silently skipped as a
+    duplicate, permanently losing the user's reply."""
+    body = _envelope("wamid.sendfail2")
+    client.post("/whatsapp/webhook", content=body, headers={"Content-Type": "application/json", "X-Hub-Signature-256": _sign(body)})
+    assert db_session.query(ProcessedWebhookEventDB).filter(ProcessedWebhookEventDB.message_id == "wamid.sendfail2").count() == 1

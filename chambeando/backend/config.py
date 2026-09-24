@@ -58,5 +58,13 @@ class Settings(BaseSettings):
     WHATSAPP_PHONE_NUMBER_ID: str | None = None
     WHATSAPP_GRAPH_API_VERSION: str = "v21.0"
 
+    # Telegram V1 pilot -- same safe-default / config-driven-provider pattern
+    # as WhatsApp above. "sandbox" (default) never touches the network;
+    # "telegram" requires TELEGRAM_BOT_TOKEN.
+    TELEGRAM_WEBHOOK_SECRET: str = "sandbox-telegram-secret-never-use-in-production"
+    TELEGRAM_PROVIDER: str = "sandbox"
+    TELEGRAM_BOT_TOKEN: str | None = None
+    RATE_LIMIT_TELEGRAM_MESSAGE_PER_MINUTE: int = 20
+
 
 settings = Settings()

@@ -1,1 +1,19 @@
 __pycache__/
+
+# Local secrets / credentials
+.env
+.env.*
+*.secrets
+
+# Local runtime logs
+*.log
+.uvicorn*
+
+# Local databases and backups
+*.db
+db_backups/
+
+# Python/test cache
+__pycache__/
+.pytest_cache/
+*.pyc
