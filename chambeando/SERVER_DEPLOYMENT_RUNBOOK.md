@@ -6,32 +6,70 @@ Específico para desplegar Chambeando en el VPS existente donde ya corre
 provider-neutral en sí — este documento cubre la integración específica en
 ESE servidor.
 
-**Nada en este documento se ha ejecutado.** No se accedió al VPS, no se
-auditó nada, no se desplegó nada, no se tocó Meta, DNS ni Barberbot. Todo lo
-de abajo es preparación para cuando decidas ejecutar la auditoría.
+**Nota de procedencia de este documento**: esta sesión de Claude Code Cloud
+nunca tuvo ni tiene acceso al VPS. Todo lo marcado `VERIFIED` en este
+documento es lo que el operador (Luis) reportó haber ejecutado y confirmado
+directamente en el servidor, fuera de esta sesión — no algo que esta sesión
+haya comprobado por sí misma. `PROPOSED` es diseño/recomendación de esta
+sesión, aún sin ejecutar. `PENDING` es un paso explícitamente NO ejecutado
+todavía, esperando autorización. Esta sesión solo edita archivos dentro del
+repositorio; ningún comando de este documento se corrió desde aquí contra el
+VPS real.
+
+---
+
+## Estado actual (resumen)
+
+```
+SERVER_AUDITED            = VERIFIED (reportado por el operador)
+BARBERBOT_DETAILS_KNOWN   = VERIFIED
+DEPLOYMENT_PATH_CHOSEN    = VERIFIED — Option B (systemd + venv)
+CHAMBEANDO_DEPLOYED_INTERNAL = VERIFIED — 127.0.0.1:8100, health PASS
+STABILITY_TEST            = VERIFIED — 5 min, 0 restarts, ~63MB RSS estable
+CADDY_BLOCK_ADDED         = VERIFIED — chambeando-v4-webhook.link-credit.com -> 127.0.0.1:8100
+DATABASE_DECISION         = VERIFIED (para este piloto) — SQLite persistente bajo /var/lib/chambeando/
+DOCKER_BUILD_REAL         = NOT_APPLICABLE_CURRENT_PATH — Docker no está instalado en el VPS y no se usó (se eligió Option B); ver sección 6
+DNS_PUBLIC_ACTIVATION     = PENDING — ver chambeando/PUBLIC_ACTIVATION_CHECKLIST.md
+META_WEBHOOK_CONFIGURED   = PENDING — bloqueado detrás de DNS_PUBLIC_ACTIVATION
+```
 
 ---
 
 ## EXISTING SERVICE vs NEW SERVICE
 
 ```
-EXISTING SERVICE: Barberbot           — producción, NO TOUCH
-NEW SERVICE:       Chambeando          — a desplegar, aislado de Barberbot
+EXISTING SERVICE: Barberbot     — producción, NO TOUCH
+NEW SERVICE:       Chambeando    — desplegado internamente, aislado de Barberbot
 ```
 
 **Regla dura para todo este documento**: ningún comando, decisión o valor
 aquí puede reiniciar, modificar, ni siquiera rozar la configuración de
-Barberbot. Donde no lo sepamos todavía (puerto, proceso, proxy, directorio),
-queda como `<TO_BE_DETERMINED_BY_AUDIT>` — nunca se asume.
+Barberbot.
 
 ---
 
-## 1. Auditoría read-only del VPS
+## 1. Auditoría del VPS — VERIFIED
 
-Bloque de comandos para ejecutar por SSH, **todos de solo lectura**. Ninguno
-reinicia servicios, edita archivos, cambia firewall/DNS, crea usuarios o
-bases de datos, ni borra nada. Pensado para correr de un tirón y pegar la
-salida completa antes de decidir nada del deployment.
+Resultado reportado por el operador (ejecutado directamente en el VPS, fuera
+de esta sesión):
+
+```
+VPS IP              = 159.89.231.213
+OS                  = Ubuntu 24.04.4 LTS
+CPU                 = 1 vCPU
+RAM                 = ~961 MiB total
+Swap                = ninguno (0)
+Disco libre         = ~18 GB
+Reverse proxy       = Caddy 2.11.4
+Docker              = NO instalado
+PostgreSQL          = NO instalado
+Python              = 3.12.3, venv disponible
+```
+
+El bloque de comandos de auditoría (solo lectura) que produjo estos
+resultados queda documentado abajo — sirve para re-auditar en el futuro (ej.
+tras cambios de hardware, o antes de un segundo servicio nuevo), no hace
+falta volver a correrlo para lo ya confirmado arriba.
 
 ```bash
 # --- Identidad del sistema ---
@@ -115,218 +153,380 @@ echo "== resumen final (para pegar en el reporte) ==" \
   && echo "Disco raiz: $(df -h / | awk 'NR==2{print $4, "libres de", $2}')"
 ```
 
-**Cómo usar esto**: correr el bloque completo por SSH, pegar toda la salida
-en la conversación. A partir de ahí completamos las secciones 3-6 de este
-documento con valores reales en vez de placeholders.
-
 ---
 
-## 2. Plan de aislamiento (diseño objetivo, sin valores inventados)
+## 2. Plan de aislamiento — VERIFIED (implementado)
 
 ```
 Barberbot:
-  NO TOUCH — ningún archivo, proceso, puerto, DB o config de Barberbot se
-  lee para modificar, solo se lee para EVITAR colisión.
+  NO TOUCH — confirmado: /root/barberbot/server.js, puerto 3001, Caddy
+  `reverse_proxy localhost:3001`. Ningún archivo/proceso/puerto/config de
+  Barberbot fue leído para modificar en este deployment, solo para
+  verificar ausencia de colisión.
 
-Chambeando:
-  Directorio:        <TO_BE_SELECTED_AFTER_AUDIT>   (ej. /opt/chambeando o /srv/chambeando -- decidir según convención ya usada por Barberbot, sección 6)
-  Proceso/container:  independiente -- ver OPTION A / OPTION B (sección 4)
-  Usuario/aislamiento: usuario de sistema dedicado (ej. `chambeando`, sin login shell), NUNCA el usuario que corre Barberbot ni root para el proceso de la app
-  Puerto interno:      CHAMBEANDO_INTERNAL_PORT=<TO_BE_SELECTED_AFTER_AUDIT>  -- debe ser distinto de BARBERBOT_PORT (sección 6) y de cualquier otro puerto ya en LISTEN
-  Env/secrets:          archivo separado fuera del repo (ej. /etc/chambeando/production.env), permisos 600, dueño = usuario de Chambeando -- nunca compartido con el .env de Barberbot
-  Logs:                 independientes -- si Docker, `docker logs chambeando-backend`; si systemd, journal propio del unit (`journalctl -u chambeando`) -- nunca mezclados con el log de Barberbot
-  Restart policy:       independiente -- `--restart unless-stopped` (Docker) o systemd unit propio con su propio `Restart=`; un fallo de Chambeando NUNCA debe poder tumbar o reiniciar el unit/container de Barberbot
-  Hostname/subdominio:  propio -- ej. un subdominio distinto de bot.link-credit.com (a definir; NO reutilizar el hostname de Barberbot)
-  Reverse proxy:        entrada independiente en la config del proxy que ya exista (Caddy/Nginx/Apache -- lo que confirme la auditoría), como bloque/server nuevo, nunca editando el bloque existente de Barberbot
-  Health check:          propio -- GET /health de Chambeando (ya implementado), monitoreado por separado del health check de Barberbot si existe
+Chambeando (VERIFIED, valores reales ya en uso):
+  Directorio release:   /opt/chambeando/releases/<SHA>
+  Symlink activo:        /opt/chambeando/current -> releases/d286190d726a956be90df5bbf66e211bb5ff3685
+  venv:                   /opt/chambeando/venv (compartido entre releases)
+  Datos persistentes:      /var/lib/chambeando/ (SQLite ahí dentro)
+  Proceso/servicio:        systemd -- chambeando.service
+  Usuario/aislamiento:     ver NOTA abajo -- confirmar con el operador el usuario exacto configurado en la unit (no se nos reportó explícitamente distinto de root; systemd unit debe usar User=/Group= dedicados, nunca root ni el usuario de Barberbot -- ver checklist en PUBLIC_ACTIVATION_CHECKLIST.md antes de exponer públicamente si esto no está ya así)
+  Puerto interno:          127.0.0.1:8100 (localhost-only, confirmado != 3001 de Barberbot)
+  Env/secrets:              /etc/chambeando/chambeando.env, fuera del repo y fuera del release, EnvironmentFile protegido
+  Logs:                     journal propio del unit (`journalctl -u chambeando`), independiente de Barberbot
+  Restart policy:           systemd unit propio (`chambeando.service`) -- un fallo de Chambeando no reinicia ni afecta el unit/proceso de Barberbot
+  Hostname/subdominio:      chambeando-v4-webhook.link-credit.com (Caddy block ya agregado -- DNS pública aún NO apunta ahí, ver sección "Estado actual")
+  Reverse proxy:            bloque Caddy independiente, nuevo, sin editar el bloque existente de Barberbot
+  Health check:             GET /health -- VERIFIED 200 {"status":"ok","app":"chambeando-backend"} vía http://127.0.0.1:8100/health
 ```
-
-No se fija ningún valor concreto (puerto, ruta, dominio) hasta tener los
-resultados de la sección 1.
 
 ---
 
-## 3. Dos caminos de deployment
+## 3. Deployment path — VERIFIED: Option B (systemd + venv)
 
-La decisión entre A y B se toma **después** de la auditoría (Docker instalado
-y con daemon operativo → A; si no, o si el operador prefiere el patrón que ya
-usa para Barberbot → B, siempre que se confirme qué usa Barberbot en la
-sección 6).
+Docker no está instalado en el VPS (confirmado en la auditoría) — se optó
+por Option B directamente, sin ambigüedad. Option A (Docker) queda
+documentada en `chambeando/DEPLOYMENT_RUNBOOK.md` como artefacto
+provider-neutral disponible si el VPS alguna vez incorpora Docker, pero
+**no es el camino en uso hoy**.
 
-### OPTION A — Docker
+### OPTION B — systemd + venv (EN USO)
 
-- Artefacto: `chambeando/Dockerfile` + `chambeando/.dockerignore` (ya
-  creados y validados estáticamente — ver `DEPLOYMENT_RUNBOOK.md`).
-- Container independiente, nombre propio (ej. `chambeando-backend`), nunca
-  compartiendo red/volumen con el container de Barberbot salvo que la
-  auditoría muestre que Barberbot no usa Docker en absoluto (en cuyo caso no
-  hay colisión posible por diseño).
-- `--env-file` apuntando a un archivo **fuera del repo** en el VPS (ej.
-  `/etc/chambeando/production.env`, permisos 600).
-- `--restart unless-stopped`.
-- `HEALTHCHECK` ya integrado en la imagen (`GET /health`).
-- Persistent storage: **ninguno para la app en sí** (stateless) — la única
-  necesidad de persistencia real es la base de datos, ver sección 5. Si
-  Postgres corre en el mismo VPS fuera de Docker, no hace falta volumen; si
-  correrá en un container Postgres separado, ese sí necesita un volumen
-  nombrado propio, distinto de cualquier volumen que use Barberbot.
-- Reverse proxy: nueva entrada en el proxy existente, apuntando a
-  `127.0.0.1:<CHAMBEANDO_INTERNAL_PORT>` publicado por el container.
-- Rollback: re-`docker run` con un tag de imagen anterior (`chambeando-backend:<git-sha-anterior>`) — ver `DEPLOYMENT_RUNBOOK.md` sección L.
+- Virtualenv independiente: `/opt/chambeando/venv` (compartido entre
+  releases sucesivos -- cada deploy reinstala `backend/requirements.txt` de
+  la release nueva sobre el mismo venv).
+- systemd unit: `/etc/systemd/system/chambeando.service` (ver plantilla
+  exacta generada por `chambeando/scripts/deploy_vps_systemd.sh`).
+- `EnvironmentFile=/etc/chambeando/chambeando.env` -- fuera del repo, nunca
+  generado ni sobrescrito por el script de deploy (ver sección 8/FASE 2).
+- Comando de producción: `uvicorn backend.main:app --host 127.0.0.1 --port 8100 --no-server-header`
+  (host fijo a loopback, nunca `0.0.0.0`, para que la única vía de entrada
+  pública sea el bloque Caddy).
+- Restart policy: `Restart=on-failure` a nivel systemd, unit propio,
+  independiente del de Barberbot.
+- Health check: `GET /health` -- ya verificado 200 internamente.
+- Reverse proxy: bloque Caddy nuevo, ya agregado y validado (ver más abajo).
+- Rollback: `chambeando/scripts/rollback_vps_systemd.sh <SHA-anterior>`.
 
-### OPTION B — systemd + venv
+### OPTION A — Docker (no usada, documentada por completitud)
 
-- Virtualenv independiente en el directorio de Chambeando (`<TO_BE_SELECTED_AFTER_AUDIT>/venv`), nunca reutilizando el venv de Barberbot aunque ambos sean Python.
-- Usuario/servicio systemd dedicado, ej.:
-  ```ini
-  [Unit]
-  Description=Chambeando backend
-  After=network.target
-
-  [Service]
-  Type=simple
-  User=chambeando
-  Group=chambeando
-  WorkingDirectory=<TO_BE_SELECTED_AFTER_AUDIT>/chambeando
-  EnvironmentFile=/etc/chambeando/production.env
-  ExecStart=<TO_BE_SELECTED_AFTER_AUDIT>/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port ${PORT} --no-server-header
-  Restart=on-failure
-  RestartSec=5
-  NoNewPrivileges=true
-
-  [Install]
-  WantedBy=multi-user.target
-  ```
-  (Plantilla — no se ha creado ni instalado ningún unit file real; `<TO_BE_SELECTED_AFTER_AUDIT>` se completa tras la auditoría.)
-- `EnvironmentFile` fuera del repo, mismo criterio que Option A (permisos
-  600, dueño = usuario de Chambeando).
-- Comando de producción: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT --no-server-header` (el mismo verificado en `DEPLOYMENT_RUNBOOK.md` — sin `--reload`).
-- Restart policy: `Restart=on-failure` a nivel systemd — independiente del
-  unit de Barberbot, que sigue con su propia policy intacta.
-- Health check: mismo `GET /health`, monitoreado con lo que ya use el VPS
-  (cron+curl, Uptime Kuma, etc. — a confirmar en la auditoría si algo así ya
-  existe para Barberbot).
-- Reverse proxy: igual que Option A, nueva entrada apuntando a
-  `127.0.0.1:<CHAMBEANDO_INTERNAL_PORT>`.
-- Rollback: `git checkout <sha-anterior>` en el directorio de Chambeando +
-  `systemctl restart chambeando` (nunca tocando el unit de Barberbot).
+Ver `chambeando/DEPLOYMENT_RUNBOOK.md` para el artefacto Docker completo
+(`Dockerfile`, `.dockerignore`, build/run/rollback). Queda disponible si en
+el futuro se instala Docker en este VPS o se migra a otro host.
 
 ---
 
-## 4. Database decision gate
-
-El reporte técnico anterior encontró que `DATABASE_URL` cae por defecto a
-`sqlite:///./chambeando_v2.db` si no se configura explícitamente, lo cual es
-un riesgo alto en cualquier filesystem efímero (ver `DEPLOYMENT_RUNBOOK.md`
-sección F). En un VPS con filesystem persistente esto es menos grave, pero
-sigue sin ser la elección correcta para producción real.
-
-**No se decide la base de datos final hasta auditar el VPS.**
+## 4. Database decision — VERIFIED (para este piloto): SQLite persistente
 
 ```
-DATABASE_DECISION = PENDING_SERVER_AUDIT
+DATABASE_DECISION = SQLITE_PERSISTENT_FOR_PILOT (VERIFIED en uso)
 ```
 
-Criterio a aplicar una vez tengamos los resultados de la sección 1:
+PostgreSQL **no está instalado** en el VPS (confirmado en la auditoría), así
+que el criterio A (preferir Postgres si ya existe y puede aislarse) no
+aplicaba. Se optó por la rama B del criterio original: SQLite persistente
+bajo `/var/lib/chambeando/` (fuera del árbol del repo/release, sobrevive
+redeploys de código), documentado explícitamente como **decisión de piloto,
+no permanente** -- ver el análisis completo en la sección 8 (FASE 6) sobre
+cuándo esto deja de ser aceptable y Postgres se vuelve obligatorio.
 
-- **A. Si PostgreSQL ya está disponible en el VPS y puede aislarse**
-  (usuario y base de datos propios para Chambeando, sin tocar las bases de
-  Barberbot): preferir esto. `DATABASE_URL` apuntaría a
-  `postgresql://<chambeando_db_user>@localhost/<chambeando_db_name>` con
-  usuario/base creados específicamente para Chambeando — nunca reusar
-  credenciales ni la base de Barberbot.
-- **B. Si no existe PostgreSQL en el VPS**: evaluar instalar Postgres
-  separado (contenedorizado o nativo, dedicado a Chambeando), o —solo si es
-  técnicamente aceptable para la carga inicial esperada y se documenta como
-  decisión temporal, no permanente— SQLite persistente en un path fuera del
-  árbol del repo/imagen, con backup explícito (ver `DEPLOYMENT_RUNBOOK.md`
-  sección L sobre por qué esto no es lo mismo que el fallback silencioso
-  actual).
+Esto es distinto y deliberadamente mejor que el riesgo original documentado
+en `DEPLOYMENT_RUNBOOK.md` sección F (`DATABASE_URL` sin configurar cayendo
+al SQLite *no persistente* `./chambeando_v2.db` relativo al cwd del
+proceso, que un filesystem efímero borraría en cada restart) -- aquí
+`DATABASE_URL` está explícitamente seteado en `/etc/chambeando/chambeando.env`
+apuntando a un path fijo y persistente en `/var/lib/chambeando/`, y el VPS
+tiene filesystem persistente (no es un container efímero), así que ese
+riesgo específico no aplica en este deployment tal como está.
 
-**No se crea ninguna base de datos, usuario de DB, ni se ejecuta ninguna
-migración contra el VPS en este turno.**
+**No se crea ninguna base de datos nueva ni se ejecuta ninguna migración
+contra el VPS en este turno** -- la migración ya reportada como parte del
+deployment inicial no se repite aquí.
 
 ---
 
-## 5. Barberbot safety checklist
-
-Antes de cualquier deployment futuro, estos datos deben conocerse con
-certeza (se completan con la salida de la sección 1):
+## 5. Barberbot safety checklist — VERIFIED
 
 ```
-BARBERBOT_PROCESS          = <TO_BE_DETERMINED_BY_AUDIT>
-BARBERBOT_PORT              = <TO_BE_DETERMINED_BY_AUDIT>
-BARBERBOT_REVERSE_PROXY     = <TO_BE_DETERMINED_BY_AUDIT>   (Caddy / Nginx / Apache / ninguno)
-BARBERBOT_SERVICE_OR_CONTAINER = <TO_BE_DETERMINED_BY_AUDIT>  (systemd unit / docker container / otro)
-BARBERBOT_DIRECTORY          = <TO_BE_DETERMINED_BY_AUDIT>
+BARBERBOT_PROCESS               = /root/barberbot/server.js
+BARBERBOT_PORT                  = 3001
+BARBERBOT_REVERSE_PROXY         = Caddy 2.11.4 -- reverse_proxy localhost:3001 (bot.link-credit.com)
+BARBERBOT_SERVICE_OR_CONTAINER  = proceso Node bajo /root/barberbot (mecanismo exacto de supervisión -- systemd unit propio, pm2, screen/tmux -- no reportado explícitamente; los scripts de esta iteración verifican por PUERTO 3001 en LISTEN, no asumen un nombre de unit systemd para Barberbot, precisamente porque ese detalle no está confirmado)
+BARBERBOT_DIRECTORY             = /root/barberbot
 ```
 
-**Regla explícita, sin excepciones:**
+**Regla explícita, sin excepciones (sigue vigente):**
 
 ```
 IF ANY BARBERBOT DETAIL IS UNKNOWN:
     DO NOT DEPLOY.
 ```
 
-Ningún valor de `CHAMBEANDO_INTERNAL_PORT`, directorio, nombre de
-servicio/container, ni entrada de reverse proxy se selecciona en firme hasta
-que las cinco líneas de arriba estén completas y confirmadas como
-NO-colisionantes con lo elegido para Chambeando.
+Con los 5 datos ya conocidos, el deployment de Chambeando procedió. Los
+scripts de deploy/rollback/verify (`chambeando/scripts/*.sh`) verifican en
+cada corrida que el puerto 3001 sigue en LISTEN antes y después de tocar
+Chambeando -- nunca asumen un nombre de servicio/unit de Barberbot que no
+fue confirmado.
+
+**Nota abierta**: el mecanismo exacto de supervisión de Barberbot (systemd /
+pm2 / otro) no quedó explícito en el reporte del operador. Si en el futuro
+se necesita reiniciar o actualizar Barberbot desde un script, ese dato debe
+confirmarse primero -- no se infiere.
 
 ---
 
 ## 6. Docker build real
 
-Este entorno (Claude Code Cloud) no tiene daemon Docker activo — confirmado
-en la iteración anterior (`docker ps` falla con "no such file or directory"
-sobre `/var/run/docker.sock`). No se puede resolver desde aquí.
-
 ```
-DOCKER_BUILD_REAL = PENDING_VPS_OR_LOCAL_DOCKER
+DOCKER_BUILD_REAL = NOT_APPLICABLE_CURRENT_PATH
 ```
 
-Antes de cualquier deployment real con Option A, ejecutar en una máquina con
-Docker operativo (el VPS mismo, tras confirmar que tiene Docker — sección 1
-— o una máquina local):
-
-```bash
-cd chambeando
-docker build -t chambeando-backend:test -f Dockerfile .
-docker run --rm -d --name chambeando-build-test -p 18000:8000 \
-  -e SECRET_KEY=build-test-only-not-real \
-  -e SETTLEMENT_ENCRYPTION_KEY="$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" \
-  -e DATABASE_URL=sqlite:////tmp/build-test.db \
-  chambeando-backend:test
-sleep 3
-curl -sf http://127.0.0.1:18000/health && echo " -- /health OK"
-docker exec chambeando-build-test sh -c 'ls /app/backend | grep -E "\.env$|\.secrets$"' && echo "ALERTA: secretos encontrados en la imagen" || echo "OK: sin .env/.secrets dentro del container"
-docker stop chambeando-build-test
-```
-
-Checklist a confirmar con esa corrida:
-- [ ] `docker build` termina sin error.
-- [ ] El container arranca y sigue corriendo (no crashea al boot).
-- [ ] `GET /health` responde 200.
-- [ ] Ningún `.env`/`.secrets` real terminó dentro de la imagen (el comando
-      de arriba lo confirma por ausencia — también se puede correr `docker
-      history` / `docker inspect` para una revisión más exhaustiva).
-
-No ejecutado en este turno — placeholder para cuando haya un Docker real
-disponible.
+Docker no está instalado en este VPS y el deployment en uso es Option B
+(systemd + venv) -- el artefacto Docker (`chambeando/Dockerfile`) no se
+construyó ni se necesitó para este deployment. Sigue disponible y validado
+estáticamente (ver `DEPLOYMENT_RUNBOOK.md` sección 6/9) para el día que se
+quiera evaluar Docker en este mismo VPS o en otro host. Nada de esto
+determina un rollback de código, que en Option B usa
+`chambeando/scripts/rollback_vps_systemd.sh`, no imágenes Docker.
 
 ---
 
-## 7. Resumen de estado
+## 7. Caddy — VERIFIED (bloque agregado y validado por el operador)
 
-```
-SERVER_AUDITED           = NO
-BARBERBOT_DETAILS_KNOWN  = NO
-DEPLOYMENT_PATH_CHOSEN   = NOT_YET (depende de la auditoría, sección 3)
-DATABASE_DECISION        = PENDING_SERVER_AUDIT
-DOCKER_BUILD_REAL        = PENDING_VPS_OR_LOCAL_DOCKER
-DEPLOYED                 = NO
+```caddyfile
+chambeando-v4-webhook.link-credit.com {
+    reverse_proxy 127.0.0.1:8100
+}
 ```
 
-**Próximo paso único:** ejecutar el bloque de la sección 1 por SSH contra el
-VPS y traer la salida completa. Ningún otro paso de este documento avanza
-hasta entonces.
+Reportado por el operador: `caddy validate` = PASS, `caddy reload` = PASS,
+y tras el reload: Caddy sigue activo, Barberbot sigue escuchando en 3001,
+Chambeando sigue respondiendo internamente en 127.0.0.1:8100. El bloque de
+Barberbot no fue tocado.
+
+Esta sesión **no generó ni aplicó** ese bloque -- se documenta aquí como
+hecho ya confirmado por el operador, y los scripts de esta iteración
+(sección 8) explícitamente **no modifican Caddy**, solo lo verifican (activo
+sí/no) como parte de sus chequeos de seguridad.
+
+**Lo que falta y sigue pendiente**: `chambeando-v4-webhook.link-credit.com`
+todavía resuelve al túnel de Cloudflare antiguo (HTTP 530 público). El
+bloque Caddy de arriba no sirve tráfico real hasta que el DNS del
+subdominio apunte al VPS. Ver `chambeando/PUBLIC_ACTIVATION_CHECKLIST.md`
+-- **no ejecutado, pendiente de autorización explícita**.
+
+---
+
+## 8. Scripts de deployment (esta iteración)
+
+Tres scripts nuevos en `chambeando/scripts/`, todos pensados para correr EN
+el VPS (no desde esta sesión, que no tiene acceso a él):
+
+- **`deploy_vps_systemd.sh RELEASE_SHA [SOURCE_REPO_DIR]`** -- convierte el
+  proceso manual ya validado en un flujo reproducible: preflight (Caddy
+  activo, puerto 3001 de Barberbot en LISTEN, puerto 8100 libre o ya
+  perteneciente a Chambeando), release directory, venv compartido,
+  `pip install -r backend/requirements.txt`, migración Alembic, symlink
+  `current` atómico, unit systemd, verificación de salud, verificación de
+  seguridad de Barberbot/Caddy post-deploy. **Nunca** genera, imprime, ni
+  sobrescribe `/etc/chambeando/chambeando.env` -- si no existe, falla con un
+  mensaje claro en vez de inventar secretos. **Nunca** toca Caddy ni DNS.
+- **`rollback_vps_systemd.sh RELEASE_SHA_ANTERIOR`** -- mueve el symlink
+  `current` atómicamente a una release previa ya presente en
+  `/opt/chambeando/releases/`, reinicia solo `chambeando.service`, verifica
+  salud + Barberbot + Caddy. No toca env ni DB -- documenta explícitamente
+  que un rollback de código NO revierte migraciones de base de datos ya
+  aplicadas.
+- **`verify_vps_systemd.sh`** -- de solo lectura. Confirma estado del
+  servicio, salud, binding, memoria/reinicios, Caddy, Barberbot, disco,
+  release activa, existencia de la DB SQLite y permisos básicos, sin
+  imprimir secretos. Termina con `VERIFY_GATE=PASS/FAIL`.
+
+Ninguno de los tres se ejecutó contra el VPS real desde esta sesión --
+solo se validó su sintaxis con `bash -n` (ver reporte final).
+
+---
+
+## 9. FASE 6 — Revisión técnica de SQLite para este piloto
+
+**Contexto real**: Chambeando corre como **un único proceso Uvicorn**
+(systemd `Type=simple`, sin múltiples workers), sirviendo un volumen de
+tráfico de piloto (WhatsApp/Telegram en modo sandbox todavía, sin usuarios
+reales de producción activos). Esto cambia sustancialmentre el perfil de
+riesgo de SQLite respecto a un deployment con varios workers/réplicas.
+
+### Journal mode actual esperado
+
+El código (`backend/database.py`) no fija explícitamente ningún
+`PRAGMA journal_mode` -- SQLAlchemy/SQLite usan el default de SQLite, que es
+`DELETE` (rollback journal clásico, no WAL). Esto es lo que corre hoy en
+`/var/lib/chambeando/`. No se ha verificado el modo activo real en el VPS
+(requeriría `PRAGMA journal_mode;` contra el archivo -- no ejecutado en esta
+sesión, sin acceso al VPS).
+
+### Concurrency / locking risks
+
+- SQLite con journal `DELETE` (el default) usa locking a nivel de **todo el
+  archivo de base de datos**: un writer bloquea a todos los demás
+  writers/readers mientras dura la transacción de escritura.
+- Con **un solo proceso Uvicorn** (el caso actual), las escrituras ya están
+  serializadas por el GIL + el hecho de ser un único proceso -- el riesgo de
+  contención real es bajo comparado con múltiples workers/procesos
+  concurrentes escribiendo a la vez.
+- El riesgo real hoy no es tanto "dos requests chocan" sino: una request de
+  escritura lenta (ej. una transacción larga) bloquea brevemente a otras
+  requests concurrentes de lectura/escritura dentro del mismo proceso,
+  aumentando latencia bajo carga -- no corrupción, solo contención.
+- Si en el futuro se escala a **más de un worker Uvicorn** (`--workers N`)
+  o a múltiples réplicas del servicio, el riesgo de locking sube
+  significativamente y SQLite deja de ser una buena elección -- ver
+  "Postgres migration trigger" abajo.
+
+### Backup requirements
+
+- **No hay backup automatizado confirmado hoy** para
+  `/var/lib/chambeando/*.db` -- no fue parte de lo reportado por el
+  operador. Esto es una brecha real para un piloto que empiece a acumular
+  datos reales (invites, órdenes, disputas).
+- Recomendación mínima (no implementada en esta sesión): un cron simple que
+  copie el archivo `.db` a una ruta separada (o a almacenamiento fuera del
+  VPS) con `sqlite3 <db> ".backup '<destino>'"` -- el comando `.backup`
+  usa la API de backup online de SQLite, segura de correr con la DB en uso,
+  a diferencia de un `cp` directo del archivo mientras el proceso escribe.
+- Fuera del alcance de esta iteración (no pedido explícitamente) -- se deja
+  como recomendación, no como script nuevo.
+
+### Riesgo de un solo proceso Uvicorn
+
+Bajo para el piloto actual: sin múltiples workers no hay condición de
+carrera entre procesos distintos sobre el mismo archivo SQLite. El riesgo
+principal no es de integridad de datos sino de **disponibilidad**: si el
+único proceso crashea, systemd lo reinicia (`Restart=on-failure`), pero hay
+una ventana de downtime real (sin réplica). Esto es un tradeoff aceptado
+implícitamente al elegir Option B de proceso único para el piloto, no algo
+nuevo introducido por SQLite en sí.
+
+### WAL mode — evidencia, pros/contras (recomendación, NO implementada)
+
+**Recomendación**: activar `PRAGMA journal_mode=WAL;` sería una mejora
+técnicamente segura y de bajo riesgo para este piloto específico, PERO
+**no se implementa en esta sesión** -- ver justificación abajo.
+
+- **Pros**: WAL permite que lectores concurrentes no bloqueen a un writer
+  (y viceversa, salvo el caso muy raro de checkpoint), reduce la latencia
+  bajo el patrón típico de esta app (muchas lecturas de estado + escrituras
+  puntuales de eventos/órdenes), y es la recomendación estándar de SQLite
+  para cualquier app servida por web (no solo scripts de un solo uso). Es
+  ampliamente considerado más robusto para procesos de larga duración que
+  el journal mode `DELETE` por defecto.
+- **Contras / riesgos a considerar**: WAL requiere que el filesystem
+  soporte locking compartido correctamente (el VPS con ext4/Ubuntu estándar
+  lo soporta sin problema, no es un riesgo real aquí); genera archivos
+  adicionales (`-wal`, `-shm`) junto al `.db` principal, que un backup
+  naive (un `cp` del `.db` solo, sin los otros dos) podría dejar
+  inconsistente -- razón de más para usar `sqlite3 .backup` en vez de `cp`
+  crudo, como se recomienda arriba independientemente del journal mode.
+- **Por qué no lo activo ahora**: el código actual (`backend/database.py`)
+  no tiene ningún test que ejercite el comportamiento bajo WAL
+  específicamente, y activar un PRAGMA de journal mode es un cambio de
+  comportamiento de infraestructura que toca el archivo de datos ya en
+  producción del piloto -- exactamente el tipo de cambio que las
+  instrucciones de esta tarea piden no aplicar salvo que sea "inequívocamente
+  seguro y tenga tests". Cambiarlo requeriría, como mínimo: un test que
+  confirme que `create_all`/Alembic siguen funcionando igual bajo WAL, y
+  aplicarlo contra el archivo real del VPS (fuera del alcance de una sesión
+  sin acceso a él). Queda como recomendación clara para una iteración futura
+  y explícita, no aplicada aquí.
+
+### Cuándo PostgreSQL se vuelve obligatorio (Postgres migration trigger)
+
+Cualquiera de estas condiciones, no implementado --> migrar antes de
+cruzarla, no después:
+
+1. **Más de un worker/proceso Uvicorn**, o cualquier forma de
+   escalado horizontal (más de una instancia del servicio).
+2. **WhatsApp o Telegram salen de modo sandbox** hacia tráfico real de
+   usuarios -- el volumen y la concurrencia de webhooks entrantes deja de
+   ser predecible.
+3. Necesidad real de **alta disponibilidad** (failover automático) -- SQLite
+   en un solo archivo en un solo VPS no lo ofrece por diseño.
+4. El tamaño de la base o la tasa de escritura empieza a mostrar latencia
+   perceptible en producción (señal empírica, a monitorear con
+   `verify_vps_systemd.sh`, no una fecha fija).
+
+---
+
+## 10. FASE 7 — Riesgo de recursos (RAM/swap)
+
+**Contexto real**: 961 MiB RAM total, 0 swap, 1 vCPU, compartido con
+Barberbot y `tasas-cuba-bot-baileys` en el mismo VPS. Chambeando reportó
+~63 MB RSS estable en la prueba de 5 minutos.
+
+### Análisis del riesgo
+
+- **RAM_RISK = MEDIUM.** No es HIGH porque el footprint medido de
+  Chambeando (~63MB) es pequeño frente al total (~961MB) y la prueba de
+  estabilidad no mostró crecimiento (sin indicios de memory leak en 5
+  minutos -- una ventana corta, pero sin señales negativas). No es LOW
+  porque: (a) sin swap, cualquier pico de memoria que exceda el
+  RAM físico dispara el OOM killer del kernel de inmediato, sin margen de
+  degradación gradual; (b) el VPS ya corre **tres** procesos de
+  aplicación (Barberbot, tasas-cuba-bot-baileys, y ahora Chambeando) más
+  Caddy sobre un total de ~961MB -- el margen combinado es estrecho, y un
+  pico simultáneo de los tres (ej. bajo carga real de WhatsApp/Telegram una
+  vez salgan de sandbox) es una situación no probada todavía.
+- El OOM killer del kernel, si dispara, puede matar **cualquier** proceso
+  del sistema según su heurística (no necesariamente el que causó el pico)
+  -- esto incluye el riesgo teórico de que un pico de memoria de Chambeando
+  cause que el kernel mate a Barberbot en vez de a sí mismo. Es un riesgo
+  real de "vecino ruidoso" en un VPS de 1 vCPU/~1GB compartido por 3+
+  servicios.
+
+### Límite seguro propuesto para el systemd unit (PROPUESTO, NO aplicado)
+
+Con ~63MB medido en reposo/piloto, un `MemoryMax=` de **256M** en la unit de
+Chambeando sería un límite conservador y razonable: deja ~4x margen sobre lo
+medido para picos normales de tráfico, sin arriesgar acaparar una porción
+desproporcionada de los ~961MB totales que también necesitan Barberbot,
+tasas-cuba-bot-baileys, Caddy y el propio sistema operativo. `MemoryHigh=`
+en, por ejemplo, **192M** (soft throttle antes de llegar al hard limit)
+sería un complemento razonable para degradar antes de que el kernel tenga
+que intervenir.
+
+**Esto es análisis y recomendación únicamente.** Por instrucción explícita
+de esta iteración, `MemoryMax` NO se cambia ni se aplica desde aquí, y
+`deploy_vps_systemd.sh` (sección 8) **no** incluye `MemoryMax=`/`MemoryHigh=`
+en la unit que genera -- se deja como paso futuro deliberado y separado,
+con su propia autorización.
+
+### Recomendación de swap
+
+**No crear swap en esta sesión** (instrucción explícita). Como análisis: un
+swapfile pequeño (ej. 512MB-1GB) sería una mitigación razonable y de bajo
+costo contra el escenario "pico corto de memoria mata el proceso
+equivocado" descrito arriba -- convierte un OOM-kill duro en degradación de
+performance temporal. Contras a considerar antes de aplicarlo: I/O de swap
+en un VPS con disco de red puede ser lento y, si el pico es sostenido (no
+corto), solo retrasa el problema en vez de resolverlo. Queda como
+recomendación para que el operador decida, no como acción de esta
+iteración.
+
+---
+
+## 11. Resumen final
+
+```
+SERVER_AUDITED             = VERIFIED
+BARBERBOT_DETAILS_KNOWN    = VERIFIED
+DEPLOYMENT_PATH_CHOSEN      = VERIFIED (Option B)
+CHAMBEANDO_INTERNAL_HEALTH  = VERIFIED PASS
+STABILITY_TEST              = VERIFIED PASS
+DATABASE_DECISION           = SQLITE_PERSISTENT_FOR_PILOT (ver sección 9 para el trigger de migración a Postgres)
+DOCKER_BUILD_REAL           = NOT_APPLICABLE_CURRENT_PATH
+CADDY_BLOCK                 = VERIFIED (agregado, validado, recargado)
+DNS_PUBLIC_ACTIVATION       = PENDING -- ver chambeando/PUBLIC_ACTIVATION_CHECKLIST.md
+```
+
+**Próximo paso único:** activación pública vía DNS, siguiendo
+`chambeando/PUBLIC_ACTIVATION_CHECKLIST.md` -- no ejecutado, pendiente de
+autorización explícita del operador.
