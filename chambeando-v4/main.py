@@ -38,15 +38,31 @@ def _load_secrets() -> dict[str, str]:
 _secrets = _load_secrets()
 VERIFY_TOKEN = _secrets.get("V4_WHATSAPP_VERIFY_TOKEN", "")
 APP_SECRET = _secrets.get("V4_WHATSAPP_APP_SECRET", "")
+_APP_SECRET_CONFIGURED = bool(APP_SECRET) and APP_SECRET != "REPLACE_ME_FROM_META_DASHBOARD"
 
 # App Secret is gated behind Meta's password re-confirmation dialog, which no
-# automated agent may fill in -- explicitly authorized fallback, scoped ONLY
-# to this receiver (port 8002 / chambeando-v4-webhook.link-credit.com): skip
-# signature validation until a real APP_SECRET is filled in. Never applies to
-# any other Chambeando backend/receiver.
-SIGNATURE_VALIDATION_DISABLED = not APP_SECRET or APP_SECRET == "REPLACE_ME_FROM_META_DASHBOARD"
+# automated agent may fill in -- so this cleanroom receiver CAN run without a
+# real one, but only if an operator deliberately says so. Fail closed by
+# default: no APP_SECRET + no explicit opt-in refuses to even start, rather
+# than silently accepting unverified webhooks. Scoped ONLY to this receiver
+# (port 8002 / chambeando-v4-webhook.link-credit.com) -- never applies to any
+# other Chambeando backend/receiver, and never set true in production.
+ALLOW_UNVERIFIED_WEBHOOKS = os.environ.get("V4_ALLOW_UNVERIFIED_WEBHOOKS", "false").strip().lower() == "true"
+
+if not _APP_SECRET_CONFIGURED and not ALLOW_UNVERIFIED_WEBHOOKS:
+    raise RuntimeError(
+        "V4_WHATSAPP_APP_SECRET is not configured in .env.v4.secrets and "
+        "V4_ALLOW_UNVERIFIED_WEBHOOKS is not 'true'. Refusing to start rather "
+        "than silently accepting webhooks with no real signature verification. "
+        "Fill in the real App Secret, or explicitly export "
+        "V4_ALLOW_UNVERIFIED_WEBHOOKS=true for local/dev-only cleanroom testing "
+        "where Meta's App Secret re-confirmation dialog cannot be completed by "
+        "an automated agent."
+    )
+
+SIGNATURE_VALIDATION_DISABLED = not _APP_SECRET_CONFIGURED  # only reachable here if ALLOW_UNVERIFIED_WEBHOOKS is True
 if SIGNATURE_VALIDATION_DISABLED:
-    logger.warning("V4_SIGNATURE_VALIDATION_TEMPORARILY_DISABLED=YES -- no APP_SECRET configured yet")
+    logger.warning("V4_SIGNATURE_VALIDATION_TEMPORARILY_DISABLED=YES -- V4_ALLOW_UNVERIFIED_WEBHOOKS=true and no APP_SECRET configured")
 
 app = FastAPI(title="Chambeando Cleanroom V4")
 

@@ -32,12 +32,15 @@ chambeando/
 cd backend
 pip install -r requirements.txt
 cp .env.example .env   # SECRET_KEY con valor real, ESCROW_CONTRACT_ADDRESS tras deployar en Shasta
+cd ..   # main.py usa imports relativos (`from .config import settings`) -- necesita
+        # correr como el paquete `backend`, no como módulo top-level suelto
 
 # API
-uvicorn main:app --reload --app-dir .
+uvicorn backend.main:app --reload
 
-# Indexer (proceso separado, no lo levanta uvicorn)
-python -m indexer
+# Indexer (proceso separado, no lo levanta uvicorn) -- mismo motivo que arriba:
+# indexer.py tambien usa imports relativos, necesita correr como backend.indexer
+python -m backend.indexer
 ```
 
 El contrato (`contracts/EscrowP2P.sol`) se compila y despliega con Hardhat/TronBox — no incluido aquí. Antes de deployar a mainnet: (1) auditoría de seguridad profesional, (2) pruebas de volumen real en Shasta testnet, (3) `owner`/`arbiter` configurados como multisig, nunca EOAs sueltas.

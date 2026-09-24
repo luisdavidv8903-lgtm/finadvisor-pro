@@ -1,0 +1,44 @@
+# Build context for Dockerfile is chambeando/ itself. Everything below is
+# excluded from what gets sent to the Docker daemon and can never end up
+# inside an image layer -- see Dockerfile's own comments for why this
+# matters (secrets, size, reproducibility).
+
+.git
+.gitignore
+
+# Secrets / credentials -- never build these into an image (see
+# DEPLOYMENT_RUNBOOK.md section M, "what must never be in the image").
+.env
+.env.*
+*.secrets
+
+# Runtime artifacts that must never ship in the image or leak between builds
+*.log
+*.db
+db_backups/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+**/.pytest_cache/
+
+# Local dev / test environments -- not needed at runtime, and a stray one
+# would otherwise bloat the build context significantly
+.venv/
+venv/
+node_modules/
+
+# Tests and local-only helper scripts -- not part of the running production
+# process (nothing under backend/ imports backend/tests at runtime)
+backend/tests/
+scripts/
+
+# Contract toolchain artifacts -- irrelevant to the Python backend image
+artifacts/
+cache/
+coverage/
+coverage.json
+
+# Editor/OS cruft
+.DS_Store
+*.swp

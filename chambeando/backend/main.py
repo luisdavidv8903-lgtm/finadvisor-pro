@@ -35,3 +35,12 @@ app.include_router(telegram.router)
 def read_root():
     # PUBLIC: a proposito no devuelve NADA especifico del marketplace (seccion 1)
     return {"message": "Chambeando — marketplace P2P privado, solo para members autenticados"}
+
+
+@app.get("/health")
+def health():
+    # Liveness/readiness probe para el orquestador de deployment (Docker
+    # HEALTHCHECK, load balancer, etc.) -- deliberadamente no toca la DB ni
+    # ningun servicio externo (Meta, Telegram, cadena): solo confirma que el
+    # proceso FastAPI esta arriba y respondiendo. Sin auth, sin config sensible.
+    return {"status": "ok", "app": "chambeando-backend"}

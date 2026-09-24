@@ -17,7 +17,16 @@ from backend.messaging.identity import (
     get_or_create_link,
     issue_link_token,
 )
-from backend.messaging.whatsapp_adapter import MetaApiError, MetaClient, SandboxMetaClient, WhatsAppAdapter, verify_webhook_signature, verify_webhook_subscription
+from backend.messaging.whatsapp_adapter import (
+    INSECURE_DEFAULT_APP_SECRET,
+    MetaApiError,
+    MetaClient,
+    SandboxMetaClient,
+    WhatsAppAdapter,
+    verify_webhook_signature,
+    verify_webhook_subscription,
+    webhook_signature_check_is_trustworthy,
+)
 from backend.models import UserDB
 
 
@@ -114,6 +123,25 @@ def test_subscription_handshake_requires_matching_mode_and_token():
     assert verify_webhook_subscription("subscribe", "correct-token", "correct-token") is True
     assert verify_webhook_subscription("subscribe", "wrong-token", "correct-token") is False
     assert verify_webhook_subscription("unsubscribe", "correct-token", "correct-token") is False
+
+
+# ---------------------------------------------------------------------------
+# webhook_signature_check_is_trustworthy -- fail-closed policy for the public
+# WHATSAPP_APP_SECRET default (deployment hardening)
+# ---------------------------------------------------------------------------
+
+
+def test_configured_secret_is_always_trustworthy():
+    assert webhook_signature_check_is_trustworthy("a-real-configured-secret", allow_unverified=False) is True
+    assert webhook_signature_check_is_trustworthy("a-real-configured-secret", allow_unverified=True) is True
+
+
+def test_default_secret_untrustworthy_without_explicit_bypass():
+    assert webhook_signature_check_is_trustworthy(INSECURE_DEFAULT_APP_SECRET, allow_unverified=False) is False
+
+
+def test_default_secret_trustworthy_only_with_explicit_bypass():
+    assert webhook_signature_check_is_trustworthy(INSECURE_DEFAULT_APP_SECRET, allow_unverified=True) is True
     assert verify_webhook_subscription(None, None, "correct-token") is False
 
 

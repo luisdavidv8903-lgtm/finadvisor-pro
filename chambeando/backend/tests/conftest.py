@@ -16,6 +16,12 @@ import uuid
 _TMP_DB_DIR = tempfile.mkdtemp(prefix="chambeando-test-")
 os.environ.setdefault("SECRET_KEY", "test-only-secret-never-use-in-production-" + uuid.uuid4().hex)
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP_DB_DIR}/unused-module-level.db")
+# Must NOT be config.py's public WHATSAPP_APP_SECRET default -- since that
+# default now fails closed (webhook_signature_check_is_trustworthy), tests
+# exercising a normally-configured webhook need a real (synthetic) secret.
+# Tests covering the fail-closed behavior itself monkeypatch back to the
+# public default explicitly (see test_whatsapp_webhook_security.py).
+os.environ.setdefault("WHATSAPP_APP_SECRET", "test-only-whatsapp-app-secret-" + uuid.uuid4().hex)
 
 from cryptography.fernet import Fernet  # noqa: E402
 

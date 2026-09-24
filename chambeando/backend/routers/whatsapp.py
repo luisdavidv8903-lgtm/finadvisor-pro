@@ -22,7 +22,7 @@ from ..deps import get_current_user
 from ..messaging import get_conversation_router
 from ..messaging.identity import LinkTokenError, consume_link_token
 from ..messaging.meta_envelope import MetaWebhookEnvelope, parse_meta_webhook_envelope
-from ..messaging.whatsapp_adapter import verify_webhook_signature, verify_webhook_subscription
+from ..messaging.whatsapp_adapter import verify_webhook_signature, verify_webhook_subscription, webhook_signature_check_is_trustworthy
 from ..models import ProcessedWebhookEventDB, SecurityEventType, UserDB
 from ..schemas import WhatsAppLinkRequest, WhatsAppLinkResponse
 from ..security.audit import log_security_event
@@ -57,6 +57,14 @@ async def receive_webhook(
     db: Session = Depends(get_db),
     limiter: RateLimiter = Depends(get_rate_limiter),
 ):
+    # Fail closed BEFORE looking at any signature: if WHATSAPP_APP_SECRET is
+    # still the public placeholder from config.py, a "valid" signature proves
+    # nothing (see webhook_signature_check_is_trustworthy's docstring) -- so
+    # every POST is rejected here unless an operator deliberately opted in.
+    if not webhook_signature_check_is_trustworthy(settings.WHATSAPP_APP_SECRET, settings.WHATSAPP_ALLOW_UNVERIFIED_WEBHOOKS):
+        logger.error("whatsapp webhook: rejected -- WHATSAPP_APP_SECRET is still the public sandbox default")
+        raise HTTPException(status_code=503, detail="Webhook no configurado de forma segura")
+
     # Signature verification happens against the EXACT raw bytes Meta sent,
     # before any JSON parsing/transformation could alter what's being
     # verified (Phase 2D.1 section 5) -- request.body() is the raw payload.

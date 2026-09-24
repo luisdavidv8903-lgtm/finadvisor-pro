@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     WHATSAPP_LINK_TOKEN_EXPIRE_SECONDS: int = 600
     RATE_LIMIT_WHATSAPP_MESSAGE_PER_MINUTE: int = 20
 
+    # Fail-closed webhook signature policy (deployment hardening). The
+    # WHATSAPP_APP_SECRET default above is a PUBLIC placeholder committed to
+    # this repo -- if a real deployment left it unconfigured, HMAC signature
+    # verification would still "pass" for any attacker who read this file and
+    # signed a forged request with that same known value. WHATSAPP_ALLOW_UNVERIFIED_WEBHOOKS
+    # gates that: default False means the webhook route refuses ALL POSTs
+    # while WHATSAPP_APP_SECRET is still the public default, regardless of
+    # whether a signature header is present or "valid" against it. Only an
+    # explicit, deliberate True (dev/sandbox-only, never set in production)
+    # lifts that refusal -- it is never inferred from APP_SECRET being empty.
+    WHATSAPP_ALLOW_UNVERIFIED_WEBHOOKS: bool = False
+
     # Phase 2D.1: config-driven provider selection — NEVER auto-detected from
     # "are credentials present" (that would silently start using a real Meta
     # transport the moment someone exports an env var for local testing).

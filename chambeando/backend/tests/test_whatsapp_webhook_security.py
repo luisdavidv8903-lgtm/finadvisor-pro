@@ -182,6 +182,74 @@ def test_webhook_accepts_valid_signature_and_dispatches(client, sandbox_client):
 
 
 # ---------------------------------------------------------------------------
+# Fail-closed policy: WHATSAPP_APP_SECRET left at its public default must
+# reject every POST regardless of the signature presented, unless an operator
+# deliberately opted in via WHATSAPP_ALLOW_UNVERIFIED_WEBHOOKS.
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_rejects_default_app_secret_even_with_matching_signature(client, sandbox_client, monkeypatch):
+    from backend.messaging.whatsapp_adapter import INSECURE_DEFAULT_APP_SECRET
+
+    monkeypatch.setattr(settings, "WHATSAPP_APP_SECRET", INSECURE_DEFAULT_APP_SECRET)
+    monkeypatch.setattr(settings, "WHATSAPP_ALLOW_UNVERIFIED_WEBHOOKS", False)
+
+    body = _envelope("wamid.defaultsecret1")
+    forged_signature = "sha256=" + hmac.new(INSECURE_DEFAULT_APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    r = client.post("/whatsapp/webhook", content=body, headers={"Content-Type": "application/json", "X-Hub-Signature-256": forged_signature})
+
+    assert r.status_code == 503
+    assert sandbox_client.sent == []  # never reached the conversation router
+
+
+def test_webhook_still_rejects_default_app_secret_with_no_signature_at_all(client, sandbox_client, monkeypatch):
+    from backend.messaging.whatsapp_adapter import INSECURE_DEFAULT_APP_SECRET
+
+    monkeypatch.setattr(settings, "WHATSAPP_APP_SECRET", INSECURE_DEFAULT_APP_SECRET)
+    monkeypatch.setattr(settings, "WHATSAPP_ALLOW_UNVERIFIED_WEBHOOKS", False)
+
+    body = _envelope("wamid.defaultsecret2")
+    r = client.post("/whatsapp/webhook", content=body, headers={"Content-Type": "application/json"})
+
+    assert r.status_code == 503
+    assert sandbox_client.sent == []
+
+
+def test_webhook_accepts_default_app_secret_only_when_bypass_explicitly_enabled(client, sandbox_client, monkeypatch):
+    from backend.messaging.whatsapp_adapter import INSECURE_DEFAULT_APP_SECRET
+
+    monkeypatch.setattr(settings, "WHATSAPP_APP_SECRET", INSECURE_DEFAULT_APP_SECRET)
+    monkeypatch.setattr(settings, "WHATSAPP_ALLOW_UNVERIFIED_WEBHOOKS", True)
+
+    body = _envelope("wamid.bypass1")
+    signature = "sha256=" + hmac.new(INSECURE_DEFAULT_APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    r = client.post("/whatsapp/webhook", content=body, headers={"Content-Type": "application/json", "X-Hub-Signature-256": signature})
+
+    assert r.status_code == 200
+    assert r.json()["processed"] == 1
+    assert len(sandbox_client.sent) == 1
+
+
+def test_webhook_bypass_flag_does_not_skip_signature_matching_itself(client, sandbox_client, monkeypatch):
+    """The bypass only lifts the "secret is still the public default" refusal
+    -- it must NOT turn into skip-signature-checking-entirely. A wrong
+    signature is still rejected even with the flag on."""
+    from backend.messaging.whatsapp_adapter import INSECURE_DEFAULT_APP_SECRET
+
+    monkeypatch.setattr(settings, "WHATSAPP_APP_SECRET", INSECURE_DEFAULT_APP_SECRET)
+    monkeypatch.setattr(settings, "WHATSAPP_ALLOW_UNVERIFIED_WEBHOOKS", True)
+
+    body = _envelope("wamid.bypass2")
+    r = client.post(
+        "/whatsapp/webhook",
+        content=body,
+        headers={"Content-Type": "application/json", "X-Hub-Signature-256": "sha256=" + "0" * 64},
+    )
+    assert r.status_code == 403
+    assert sandbox_client.sent == []
+
+
+# ---------------------------------------------------------------------------
 # Real envelope parsing — multiple entries/changes, interactive/button,
 # statuses ignored, unsupported types safely skipped
 # ---------------------------------------------------------------------------

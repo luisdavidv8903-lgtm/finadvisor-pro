@@ -163,6 +163,26 @@ def verify_webhook_signature(app_secret: str, payload: bytes, signature_header: 
     return hmac.compare_digest(expected, provided)
 
 
+# Matches config.py's WHATSAPP_APP_SECRET default exactly -- kept as one named
+# constant so the two never drift apart.
+INSECURE_DEFAULT_APP_SECRET = "sandbox-app-secret-never-use-in-production"
+
+
+def webhook_signature_check_is_trustworthy(app_secret: str, allow_unverified: bool) -> bool:
+    """False when `app_secret` is still INSECURE_DEFAULT_APP_SECRET -- that
+    string is committed to this repo, so anyone who reads it can compute a
+    matching X-Hub-Signature-256 for it, making verify_webhook_signature()
+    succeed against a forged request even though no real secret protects the
+    endpoint. Fails closed: the caller must reject ALL webhook POSTs while
+    this returns False, no matter what signature accompanies them. The only
+    way past it is `allow_unverified=True`, a deliberate opt-in that must
+    never be derived from app_secret being empty/default -- only ever from an
+    operator explicitly setting it (dev/sandbox-only, never in production)."""
+    if app_secret != INSECURE_DEFAULT_APP_SECRET:
+        return True
+    return allow_unverified
+
+
 def verify_webhook_subscription(mode: str | None, token: str | None, expected_token: str) -> bool:
     """The one-time GET handshake Meta performs when a webhook URL is first
     registered -- must echo back hub.challenge ONLY if mode=="subscribe" and
