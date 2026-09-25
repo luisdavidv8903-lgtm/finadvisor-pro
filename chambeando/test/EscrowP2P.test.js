@@ -23,7 +23,7 @@ async function baseFixture() {
   const token = await MockTRC20.deploy("Mock USDT", "mUSDT", 6);
   await token.waitForDeployment();
 
-  const EscrowP2P = await ethers.getContractFactory("EscrowP2P");
+  const EscrowP2P = await ethers.getContractFactory("contracts/EscrowP2P.sol:EscrowP2P");
   const escrow = await EscrowP2P.deploy(
     owner.address,
     arbiter.address,
@@ -45,7 +45,7 @@ async function baseFixture() {
 async function feeFixture() {
   const base = await baseFixture();
   // separate escrow instance with a live 1% fee, to isolate fee math tests
-  const EscrowP2P = await ethers.getContractFactory("EscrowP2P");
+  const EscrowP2P = await ethers.getContractFactory("contracts/EscrowP2P.sol:EscrowP2P");
   const feeEscrow = await EscrowP2P.deploy(
     base.owner.address,
     base.arbiter.address,
@@ -93,7 +93,7 @@ describe("EscrowP2P", function () {
       const tokenB = await MockTRC20.deploy("Other Token", "OTH", 6);
       await tokenB.waitForDeployment();
 
-      const EscrowP2P = await ethers.getContractFactory("EscrowP2P");
+      const EscrowP2P = await ethers.getContractFactory("contracts/EscrowP2P.sol:EscrowP2P");
       const escrowB = await EscrowP2P.deploy(owner.address, arbiter.address, feeCollector.address, 0, await tokenB.getAddress());
       await escrowB.waitForDeployment();
 
@@ -463,7 +463,7 @@ describe("EscrowP2P", function () {
       const evilToken = await Evil.deploy();
       await evilToken.waitForDeployment();
 
-      const EscrowP2P = await ethers.getContractFactory("EscrowP2P");
+      const EscrowP2P = await ethers.getContractFactory("contracts/EscrowP2P.sol:EscrowP2P");
       const escrow = await EscrowP2P.deploy(owner.address, arbiter.address, feeCollector.address, 0, await evilToken.getAddress());
       await escrow.waitForDeployment();
 
@@ -513,7 +513,7 @@ describe("EscrowP2P", function () {
       const usdt = await MockUSDTTron.deploy();
       await usdt.waitForDeployment();
 
-      const EscrowP2P = await ethers.getContractFactory("EscrowP2P");
+      const EscrowP2P = await ethers.getContractFactory("contracts/EscrowP2P.sol:EscrowP2P");
       const escrow = await EscrowP2P.deploy(owner.address, arbiter.address, feeCollector.address, 0, await usdt.getAddress());
       await escrow.waitForDeployment();
 
@@ -769,7 +769,7 @@ describe("EscrowP2P", function () {
       const shortToken = await Mock.deploy(feeBpsOnToken);
       await shortToken.waitForDeployment();
 
-      const EscrowP2P = await ethers.getContractFactory("EscrowP2P");
+      const EscrowP2P = await ethers.getContractFactory("contracts/EscrowP2P.sol:EscrowP2P");
       const escrow = await EscrowP2P.deploy(owner.address, arbiter.address, feeCollector.address, 0, await shortToken.getAddress());
       await escrow.waitForDeployment();
 
@@ -811,7 +811,7 @@ describe("EscrowP2P", function () {
       const MockUSDTTron = await ethers.getContractFactory("MockUSDTTron");
       const usdt = await MockUSDTTron.deploy();
       await usdt.waitForDeployment();
-      const EscrowP2P = await ethers.getContractFactory("EscrowP2P");
+      const EscrowP2P = await ethers.getContractFactory("contracts/EscrowP2P.sol:EscrowP2P");
       const usdtEscrow = await EscrowP2P.deploy(owner.address, arbiter.address, feeCollector.address, 0, await usdt.getAddress());
       await usdtEscrow.waitForDeployment();
       await usdt.mint(seller.address, 100n * ONE_TOKEN);

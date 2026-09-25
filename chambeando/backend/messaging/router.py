@@ -177,8 +177,12 @@ class ConversationRouter:
     def _handle_join(self, db: Session, whatsapp_id: str, session: ConversationSessionDB) -> None:
         user = identity.get_linked_user(db, whatsapp_id)
         if user is None:
-            token = identity.issue_link_token(db, whatsapp_id, settings.WHATSAPP_LINK_TOKEN_EXPIRE_SECONDS)
-            link_url = f"{self._dapp_base_url}/link?token={token}"
+            # network_id defaults inside issue_link_token to settings.CHAIN_ADAPTER
+            # (today's only real network) -- passed explicitly here so the deep
+            # link's querystring and the token's server-side binding always agree.
+            network_id = settings.CHAIN_ADAPTER
+            token = identity.issue_link_token(db, whatsapp_id, settings.WHATSAPP_LINK_TOKEN_EXPIRE_SECONDS, network_id=network_id)
+            link_url = f"{self._dapp_base_url}/link?token={token}&network={network_id}"
             self._set_state(db, session, ConversationState.AWAITING_LINK, context={})
             self._send_handoff(
                 whatsapp_id,

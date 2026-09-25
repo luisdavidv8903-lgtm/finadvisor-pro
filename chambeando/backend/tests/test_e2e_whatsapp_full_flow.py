@@ -17,7 +17,7 @@ from backend.messaging.whatsapp_adapter import SandboxMetaClient
 from backend.models import MemberRole, MembershipStatus, OrderStatus, P2POrderDB
 
 from .conftest import auth_headers, login, seed_membership, sync_indexer
-from .test_whatsapp_conversation_flow import SYNTHETIC_ACCOUNT_REFERENCE, SYNTHETIC_PAYMENT_METHOD, _w, link_wallet
+from .test_whatsapp_conversation_flow import SYNTHETIC_ACCOUNT_REFERENCE, SYNTHETIC_PAYMENT_METHOD, _extract_link_token, _w, link_wallet
 
 SYNTHETIC_TOKEN_ADDRESS = "TFakeE2EWhatsAppToken001"
 
@@ -236,8 +236,8 @@ def test_wallet_linked_but_no_membership_denied(client, db_session, wa):
     wallet = _w("0xE2EWaNoMembership1")
     router.handle_inbound(db_session, "wa-nomembership-1", "JOIN")
     token = login(client, wallet)
-    link_token = mock.sent[-1][1].split("token=")[1]
-    r = client.post("/whatsapp/link", json={"link_token": link_token}, headers=auth_headers(token))
+    link_token = _extract_link_token(mock.sent[-1][1])
+    r = client.post("/whatsapp/link", json={"link_token": link_token, "network_id": "tron"}, headers=auth_headers(token))
     assert r.status_code == 200
 
     router.handle_inbound(db_session, "wa-nomembership-1", "BUY")

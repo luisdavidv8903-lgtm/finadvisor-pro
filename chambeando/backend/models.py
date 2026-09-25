@@ -338,7 +338,14 @@ class WhatsAppLinkDB(Base):
 
     link_token_hash/link_token_expires_at hold a short-lived, single-use,
     hashed (never plaintext) token for the deep-link handoff to the wallet-
-    signing page -- same hash-not-plaintext discipline as InviteDB.code_hash."""
+    signing page -- same hash-not-plaintext discipline as InviteDB.code_hash.
+
+    link_token_network_id (multichain refactor): the network_id the token was
+    ISSUED for, set once alongside link_token_hash and cleared alongside it on
+    consumption. Server-side binding, never trusted from a client-supplied
+    value alone -- consume_link_token() rejects a network_id that does not
+    match this column, so a query-string `&network=` on the deep link can
+    never be swapped by whoever opens the link (see messaging/identity.py)."""
 
     __tablename__ = "whatsapp_links"
     id = Column(Integer, primary_key=True, index=True)
@@ -346,6 +353,7 @@ class WhatsAppLinkDB(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     link_token_hash = Column(String, nullable=True, index=True)
     link_token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    link_token_network_id = Column(String, nullable=True)
     linked_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
 

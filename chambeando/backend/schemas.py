@@ -293,6 +293,13 @@ class SecurityEventOut(BaseModel):
 
 class WhatsAppLinkRequest(BaseModel):
     link_token: str = Field(min_length=1, max_length=128)
+    # Required (multichain refactor): the wallet-signing page echoes back the
+    # network_id it got from the deep link's `&network=` querystring. This is
+    # never trusted as the source of truth by itself -- consume_link_token()
+    # rejects it unless it matches what the token was actually ISSUED for
+    # (server-side, at /whatsapp JOIN time). A mismatch, an unknown network,
+    # or a DISABLED network all fail closed. See messaging/identity.py.
+    network_id: str = Field(min_length=1, max_length=64)
 
 
 class WhatsAppLinkResponse(BaseModel):

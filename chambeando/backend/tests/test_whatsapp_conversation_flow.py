@@ -59,7 +59,7 @@ def link_wallet(client, db_session, router, sandbox_client, whatsapp_id: str, wa
     router.handle_inbound(db_session, whatsapp_id, "JOIN")
     token = _extract_link_token(_last_text(sandbox_client))
     access_token = login(client, wallet_address)
-    link_resp = client.post("/whatsapp/link", json={"link_token": token}, headers=auth_headers(access_token))
+    link_resp = client.post("/whatsapp/link", json={"link_token": token, "network_id": "tron"}, headers=auth_headers(access_token))
     assert link_resp.status_code == 200, link_resp.text
     return access_token
 

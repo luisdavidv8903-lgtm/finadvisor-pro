@@ -129,7 +129,7 @@ def link_whatsapp_identity(
     binds an already-proven identity to the WhatsApp id that issued the
     link_token (see messaging/identity.py)."""
     try:
-        link = consume_link_token(db, payload.link_token, current_user)
+        link = consume_link_token(db, payload.link_token, current_user, network_id=payload.network_id)
     except LinkTokenError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.reason)
 

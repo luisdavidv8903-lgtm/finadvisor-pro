@@ -9,16 +9,22 @@ Pivote respecto al MVP original auditado en `security-audits/chambeando/`: Chamb
 ```
 chambeando/
 ├── contracts/
-│   └── EscrowP2P.sol       # escrow no-custodial — NO AUDITADO, no usar con fondos reales sin auditoría profesional
+│   ├── EscrowP2P.sol       # escrow no-custodial TRON — NO AUDITADO, no usar con fondos reales sin auditoría profesional
+│   └── evm/
+│       └── EscrowP2P.sol   # mismo escrow, puerto EVM (BSC/Ethereum/Avalanche/Celo/...) — ver MULTICHAIN_ARCHITECTURE.md
 └── backend/
     ├── main.py              # FastAPI: auth por firma, metadata de órdenes, evidencia de disputas
     ├── auth.py               # login por firma de wallet (challenge-response), sin contraseñas
-    ├── chain.py               # cliente de lectura del contrato (tronpy)
+    ├── chain/                 # EscrowChainAdapter (interfaz) + adapters por familia (tron_adapter.py, evm_adapter.py) + networks.py (registry)
     ├── indexer.py              # worker separado: sincroniza eventos on-chain -> Postgres
     ├── models.py                # P2POrderDB.onchain_status lo escribe SOLO el indexer
     ├── config.py, database.py, schemas.py, deps.py
     └── requirements.txt
 ```
+
+Arquitectura multichain (network registry, chain families, cómo agregar una
+red nueva sin duplicar código): ver [`MULTICHAIN_ARCHITECTURE.md`](MULTICHAIN_ARCHITECTURE.md).
+Producción sigue operando solo sobre TRON — ninguna red EVM está activa.
 
 ## Principios de diseño
 

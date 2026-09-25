@@ -14,3 +14,13 @@ tronpy>=0.6.2,<0.7
 cryptography>=42.0
 alembic>=1.13
 httpx>=0.27  # Phase 2D.1: real Meta WhatsApp Cloud API outbound client (messaging/whatsapp_adapter.py)
+
+# Multichain refactor -- chain/evm_adapter.py, el equivalente EVM de tronpy arriba.
+# eth-account (pura Python + pycryptodome, sin extension C) es lo unico que el test
+# suite necesita: firma/verificacion EIP-191, sin abrir ninguna conexion RPC real.
+# web3 completo (contrato/eventos/bloques reales) se deja como requirement para un
+# deploy real, pero NO se instalo en este entorno de desarrollo -- su dependencia
+# transitiva lru-dict necesita un compilador C/Visual Studio que esta maquina no
+# tiene; eso no bloquea nada de esta fase porque ningun network EVM esta ACTIVE.
+eth-account>=0.11,<0.14
+web3>=6.15,<7
