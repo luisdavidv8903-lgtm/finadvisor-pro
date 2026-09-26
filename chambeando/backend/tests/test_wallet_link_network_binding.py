@@ -48,11 +48,18 @@ def test_network_mismatch_during_link_is_rejected(db_session, user):
 
 
 def test_disabled_network_during_link_issuance_is_rejected(db_session):
-    """bsc esta DISABLED en el registry hoy -- issue_link_token falla cerrado
+    """ethereum esta DISABLED en el registry hoy Y no esta en la whitelist
+    auth-only (chain/auth_networks.py) -- issue_link_token falla cerrado
     ANTES de emitir ningun token, nunca deja un link a medio-emitir para una
-    red que no puede operar."""
+    red que no puede operar ni esta admitida solo-para-auth. Se usa
+    'ethereum' (no 'bsc') a proposito: la identidad auth-only para EVM se
+    llama "evm" (ver chain/auth_networks.py:EVM_AUTH_ONLY_LIMITATIONS --
+    personal_sign no liga la firma a ninguna cadena EVM especifica, asi que
+    ninguna cadena EVM real como 'bsc' o 'ethereum' es NUNCA un network_id
+    auth-only valido -- ambas siguen DISABLED como cualquier otra entrada
+    operacional, ver test_auth_multi_network_evm.py)."""
     with pytest.raises(LinkTokenError, match="DISABLED"):
-        issue_link_token(db_session, "wa-bind-disabled-1", ttl_seconds=600, network_id="bsc")
+        issue_link_token(db_session, "wa-bind-disabled-1", ttl_seconds=600, network_id="ethereum")
 
 
 def test_historical_network_during_link_issuance_is_rejected(db_session):
@@ -66,22 +73,24 @@ def test_historical_network_during_link_issuance_is_rejected(db_session):
 
 
 def test_disabled_network_during_link_consumption_is_rejected(db_session, user):
-    """Simula un token ya emitido cuyo network_id quedo DISABLED entre la
-    emision y el consumo (p.ej. un operador desactivo la red) -- el
-    re-chequeo de consume_link_token debe rechazarlo, no solo el de
-    issue_link_token. Se fuerza el escenario escribiendo directamente
+    """Simula un token ya emitido cuyo network_id quedo DISABLED (y no
+    auth-only) entre la emision y el consumo (p.ej. un operador desactivo la
+    red) -- el re-chequeo de consume_link_token debe rechazarlo, no solo el
+    de issue_link_token. Se fuerza el escenario escribiendo directamente
     link_token_network_id (issue_link_token en si mismo ya rechaza emitir
-    para 'bsc', ver test de arriba -- este test aisla especificamente el
-    gate del lado de CONSUMO)."""
+    para 'ethereum', ver test de arriba -- este test aisla especificamente
+    el gate del lado de CONSUMO). Usa 'ethereum', no 'bsc', por la misma
+    razon que el test anterior: ninguna cadena EVM especifica es un
+    network_id auth-only valido (ver chain/auth_networks.py)."""
     from backend.models import WhatsAppLinkDB
 
     token = issue_link_token(db_session, "wa-bind-disabled-consume-1", ttl_seconds=600, network_id="tron")
     link = db_session.query(WhatsAppLinkDB).filter(WhatsAppLinkDB.whatsapp_id == "wa-bind-disabled-consume-1").first()
-    link.link_token_network_id = "bsc"
+    link.link_token_network_id = "ethereum"
     db_session.commit()
 
     with pytest.raises(LinkTokenError, match="DISABLED"):
-        consume_link_token(db_session, token, user, network_id="bsc")
+        consume_link_token(db_session, token, user, network_id="ethereum")
 
 
 def test_historical_network_during_link_consumption_is_rejected(db_session, user):

@@ -22,10 +22,12 @@ import hashlib
 import secrets
 from datetime import timedelta
 
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from .. import timeutils
 from ..chain import get_network
+from ..chain.auth_networks import is_auth_only_network
 from ..chain.networks import NEVER_OPERATIONAL_STATUSES
 from ..config import settings
 from ..models import UserDB, WhatsAppLinkDB
@@ -38,21 +40,40 @@ class LinkTokenError(Exception):
         super().__init__(reason)
 
 
-def _resolve_and_require_operational_network(network_id: str | None) -> str:
+def _resolve_and_require_linkable_network(network_id: str | None) -> str:
     """Falls back to settings.CHAIN_ADAPTER (today's only real network) when
     the caller doesn't pass one -- backward compatible for existing callers.
-    Always fails closed: an unknown, DISABLED or HISTORICAL network never
-    issues/consumes a token -- network mismatch is the caller's job to check
-    separately (see consume_link_token).
+    Always fails closed: an unknown network, or one that is neither
+    operational NOR auth-only-allowed, never issues/consumes a token --
+    network mismatch is the caller's job to check separately (see
+    consume_link_token).
+
+    Renamed from `_resolve_and_require_operational_network` (revision
+    2026-09-25, multi-network auth): a network can now be valid for a
+    wallet-link token for EITHER of two independent reasons --
+
+    1. It's operational (NetworkStatus not in NEVER_OPERATIONAL_STATUSES,
+       chain/networks.py) -- same check as before, unchanged.
+    2. It's explicitly allowed for AUTH-ONLY use (chain/auth_networks.py) --
+       e.g. "evm" (a chain-FAMILY auth identity, not any specific EVM chain
+       like bsc -- see that module's docstring for why), which has no entry
+       at all in this operational registry (no EvmEscrowAdapter, no RPC, no
+       contract) but can still issue/consume a wallet-link token, because
+       linking a WhatsApp identity to a wallet is an AUTH fact, not an
+       operational/escrow one. Checked FIRST and short-circuits: an
+       auth-only network never needs to also satisfy NetworkStatus, by
+       design -- the two gates are independent, neither implies the other.
 
     Uses the SAME NEVER_OPERATIONAL_STATUSES tuple that
-    chain/__init__.py's build_adapter_for_network() gates on -- a prior
-    version of this function had its own copy of the check (just
+    chain/__init__.py's build_adapter_for_network() gates on for path 1 -- a
+    prior version of this function had its own copy of the check (just
     `status == DISABLED`) that drifted out of sync when NetworkStatus.HISTORICAL
     was added, letting a HISTORICAL network (e.g. Algorand) issue/consume a
     wallet-link token even though it can never have a working adapter. One
     shared constant means the two gates cannot diverge again."""
     resolved = network_id or settings.CHAIN_ADAPTER
+    if is_auth_only_network(resolved):
+        return resolved
     try:
         network = get_network(resolved)
     except ValueError:
@@ -89,13 +110,32 @@ def issue_link_token(db: Session, whatsapp_id: str, ttl_seconds: int, network_id
     settings.CHAIN_ADAPTER (today's only real network) for callers that don't
     pass one yet. Fails closed (LinkTokenError) for an unknown/DISABLED
     network -- no token is issued for a network that can't operate."""
-    resolved_network_id = _resolve_and_require_operational_network(network_id)
+    resolved_network_id = _resolve_and_require_linkable_network(network_id)
     link = get_or_create_link(db, whatsapp_id)
     token = secrets.token_urlsafe(24)
-    link.link_token_hash = _hash_token(token)
-    link.link_token_expires_at = timeutils.utcnow() + timedelta(seconds=ttl_seconds)
-    link.link_token_network_id = resolved_network_id
+    # Compare-and-swap: a concurrent consume/reissue must not be overwritten
+    # by this session's stale row. A later, deliberate issuance still rotates
+    # the outstanding token, but never changes an existing wallet owner.
+    result = db.execute(
+        update(WhatsAppLinkDB)
+        .where(
+            WhatsAppLinkDB.id == link.id,
+            WhatsAppLinkDB.link_token_hash == link.link_token_hash,
+            WhatsAppLinkDB.link_token_expires_at == link.link_token_expires_at,
+            WhatsAppLinkDB.link_token_network_id == link.link_token_network_id,
+            WhatsAppLinkDB.user_id == link.user_id,
+        )
+        .values(
+            link_token_hash=_hash_token(token),
+            link_token_expires_at=timeutils.utcnow() + timedelta(seconds=ttl_seconds),
+            link_token_network_id=resolved_network_id,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        raise LinkTokenError("link changed concurrently; retry token issuance")
     db.commit()
+    db.refresh(link)
     return token
 
 
@@ -122,16 +162,34 @@ def consume_link_token(db: Session, token: str, user: UserDB, network_id: str | 
     if network_id is not None:
         if link.link_token_network_id != network_id:
             raise LinkTokenError("network mismatch: this link was issued for a different network")
-        _resolve_and_require_operational_network(network_id)  # re-check fail-closed: config may have changed since issuance
+        _resolve_and_require_linkable_network(network_id)  # re-check fail-closed: config may have changed since issuance
     if link.user_id is not None and link.user_id != user.id:
         raise LinkTokenError("this WhatsApp identity is already linked to a different wallet")
 
-    link.user_id = user.id
-    link.linked_at = timeutils.utcnow()
-    link.link_token_hash = None  # single-use
-    link.link_token_expires_at = None
-    link.link_token_network_id = None
-    db.commit()
+    # The caller owns commit/rollback, including the security audit event.
+    # All authorization predicates are repeated at the write, after any wait
+    # for another transaction's lock. Exactly one consumer can clear the hash.
+    result = db.execute(
+        update(WhatsAppLinkDB)
+        .where(
+            WhatsAppLinkDB.id == link.id,
+            WhatsAppLinkDB.link_token_hash == _hash_token(token),
+            WhatsAppLinkDB.link_token_expires_at.is_not(None),
+            WhatsAppLinkDB.link_token_expires_at >= timeutils.utcnow(),
+            WhatsAppLinkDB.link_token_network_id == link.link_token_network_id,
+            or_(WhatsAppLinkDB.user_id.is_(None), WhatsAppLinkDB.user_id == user.id),
+        )
+        .values(
+            user_id=user.id,
+            linked_at=timeutils.utcnow(),
+            link_token_hash=None,
+            link_token_expires_at=None,
+            link_token_network_id=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        raise LinkTokenError("link token no longer valid or already consumed")
     db.refresh(link)
     return link
 

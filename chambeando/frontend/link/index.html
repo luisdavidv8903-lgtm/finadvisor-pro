@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Chambeando — Vincular wallet</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- No-referrer a proposito (revision 2026-09-25, endurecimiento): esta
+     pagina se abre con un token de un solo uso en la URL -- un Referer con
+     esa URL completa nunca debe salir hacia ningun recurso, ni de esta
+     pagina ni de ninguna futura que se agregue aqui por error. -->
+<meta name="referrer" content="no-referrer" />
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 3rem auto; padding: 0 1rem; color: #222; }
+  button { font-size: 1rem; padding: 0.6rem 1.2rem; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.6; }
+  .status { margin-top: 1rem; padding: 0.8rem; border-radius: 6px; }
+  .status.info { background: #eef; }
+  .status.ok { background: #efe; }
+  .status.err { background: #fee; }
+  .warn { font-size: 0.85rem; color: #555; margin-top: 2rem; }
+  .unverified { font-size: 0.85rem; color: #a60; background: #fff6e6; padding: 0.6rem; border-radius: 6px; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<h1>Vincular wallet a WhatsApp</h1>
+<p id="intro">Cargando...</p>
+<button id="connectBtn" disabled>Conectar wallet</button>
+<div id="status" class="status info" style="display:none"></div>
+<p id="unverifiedNote" class="unverified"></p>
+<p class="warn">
+  Esta pagina NUNCA pide tu clave privada ni tu frase semilla. Solo usa el
+  proveedor inyectado por tu wallet (navegador integrado o extension) para
+  firmar un mensaje de verificacion — la clave privada nunca sale de la
+  wallet.
+</p>
+
+<!-- Config SEPARADA de este archivo a proposito -- ver config.js. index.html
+     nunca hardcodea la URL de la API ni la lee del query string. -->
+<script src="./config.js"></script>
+
+<script>
+/*
+ * Pagina estatica de vinculacion segura (revision 2026-09-25). Sin build
+ * step ni framework a proposito -- pagina de revision local, no un deploy
+ * real (ver "no despliegues el frontend"). No carga NINGUN recurso de
+ * terceros (sin fuentes externas, sin analytics, sin CDN) -- todo vive en
+ * este unico archivo mas config.js, para que no exista ninguna via de que
+ * el token de la URL se filtre hacia un origen ajeno via el request de un
+ * recurso externo.
+ *
+ * Redes soportadas -- DOS, no una (hallazgo de revision 2026-09-25:
+ * "JOIN" heredado sigue emitiendo network=tron; una pagina que solo
+ * aceptara bsc rompia ese flujo de punta a punta aunque el backend/router
+ * siguieran funcionando). Cada red usa el mecanismo de firma que su propia
+ * familia de cadena requiere -- nunca se confunde el soporte de una con el
+ * de la otra:
+ *
+ *   "tron"  -> extension TronLink (window.tronWeb/window.tronLink),
+ *              firma via trx.signMessageV2 (TIP-191, ver mas abajo).
+ *   "evm"   -> proveedor EIP-1193 (window.ethereum) -- navegador integrado
+ *              o extension de Trust Wallet/MetaMask/etc, firma via
+ *              personal_sign (EIP-191). Auth-only: ver
+ *              backend/chain/auth_networks.py.
+ *
+ * Por que "evm" y no "bsc" (hallazgo de revision 2026-09-25): personal_sign
+ * NO liga la firma a ninguna cadena EVM especifica -- el hash firmado
+ * ("\x19Ethereum Signed Message:\n" + len + mensaje) no incluye chainId en
+ * ninguna parte, asi que la MISMA wallet produce la MISMA firma sin
+ * importar si tiene seleccionada BSC, Ethereum u otra red EVM. Decir "bsc"
+ * aqui habria sido afirmar una verificacion que nunca se hizo -- ver
+ * backend/chain/auth_networks.py:EVM_AUTH_ONLY_LIMITATIONS para el detalle
+ * completo (que SI prueba este flujo, que NO prueba, y que haria falta
+ * -- EIP-712 con chainId en el domain separator -- para probar
+ * criptograficamente una cadena EVM especifica). Ninguna cadena EVM
+ * especifica (bsc, ethereum, ...) esta activa en el registry operacional
+ * (backend/chain/networks.py) -- esta pagina nunca crea/publica/reclama/
+ * liquida ordenes en ninguna de las dos redes.
+ *
+ * WalletConnect (v2, para cualquiera de las dos redes) -- NO IMPLEMENTADO
+ * en esta fase: requiere un SDK externo y un project ID real que no
+ * existen todavia para Chambeando -- no se inventa uno aqui. Ver bundle de
+ * revision para el detalle.
+ */
+
+const SUPPORTED_NETWORKS = ["tron", "evm"];
+
+const introEl = document.getElementById("intro");
+const btnEl = document.getElementById("connectBtn");
+const statusEl = document.getElementById("status");
+const unverifiedNoteEl = document.getElementById("unverifiedNote");
+
+function showStatus(kind, text) {
+  statusEl.style.display = "block";
+  statusEl.className = "status " + kind;
+  statusEl.textContent = text;
+}
+
+// --- Leer token/network UNA vez y borrarlos de la barra de direcciones ---
+// (endurecimiento pedido explicitamente: nunca dejar el link_token visible
+// en la URL una vez leido -- ni en el historial del navegador, ni en una
+// captura de pantalla, ni en el sync de historial entre dispositivos).
+// Hecho PRIMERO, antes de cualquier otra validacion (incluida la de
+// config.js abajo) -- revision 2026-09-25: un error de configuracion no
+// debe dejar el token expuesto en la URL mas tiempo del necesario.
+const params = new URLSearchParams(window.location.search);
+const linkToken = params.get("token");
+const network = params.get("network");
+if (window.location.search) {
+  window.history.replaceState(null, "", window.location.pathname);
+}
+
+// --- Configuracion: SOLO desde config.js, NUNCA desde el query string ---
+// (endurecimiento pedido explicitamente: "sin permitir que el query string
+// elija la API" -- una URL de API controlada por query string seria una via
+// para que un enlace malicioso redirija las credenciales/firma del usuario
+// hacia un servidor ajeno).
+const config = window.CHAMBEANDO_LINK_CONFIG || {};
+const API_BASE_URL = config.apiBaseUrl;
+
+function isAllowedApiBaseUrl(url) {
+  // https:// real, o el escape de desarrollo local explicito -- cualquier
+  // otro valor (vacio, un placeholder sin reemplazar, un http:// que no sea
+  // localhost) hace que la pagina se niegue a arrancar en vez de operar
+  // contra un origen inseguro o mal configurado. Usa new URL(...).hostname
+  // (comparacion de host exacto), no un prefijo de string -- un chequeo por
+  // prefijo tambien aceptaria "http://localhost.evil.com".
+  if (typeof url !== "string" || url.length === 0) return false;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === "https:" && parsed.hostname.length > 0) return true;
+  if (parsed.protocol === "http:" && parsed.hostname === "localhost") return true;
+  return false;
+}
+
+if (!isAllowedApiBaseUrl(API_BASE_URL)) {
+  introEl.textContent = "Configuracion invalida.";
+  showStatus(
+    "err",
+    "config.js no tiene una apiBaseUrl valida (debe ser https:// real, o http://localhost para desarrollo). Esta pagina no puede continuar."
+  );
+  throw new Error("invalid apiBaseUrl in config.js");
+}
+
+if (!linkToken || !network) {
+  introEl.textContent = "Enlace invalido: falta el token o la red.";
+  showStatus("err", "Este enlace no es valido. Pedi uno nuevo desde WhatsApp con JOIN.");
+} else if (!SUPPORTED_NETWORKS.includes(network)) {
+  introEl.textContent = "Red no soportada.";
+  showStatus(
+    "err",
+    `Esta pagina solo admite las redes ${SUPPORTED_NETWORKS.join(", ")}. Red recibida: "${network}".`
+  );
+} else if (network === "tron") {
+  introEl.textContent = "Conecta tu wallet TRON (TronLink) para vincularla a tu WhatsApp.";
+  btnEl.textContent = "Conectar wallet (TronLink)";
+  unverifiedNoteEl.textContent =
+    "Esta pagina usa trx.signMessageV2 (TIP-191), el metodo recomendado por TronLink -- probado algoritmicamente " +
+    "contra el verificador real del backend, pero NO contra la extension TronLink real todavia. No la actives " +
+    "para usuarios reales hasta confirmarlo manualmente.";
+  btnEl.disabled = false;
+  btnEl.addEventListener("click", handleConnectTron);
+} else {
+  introEl.textContent = "Conecta tu wallet (Trust Wallet u otra wallet EVM) para vincularla a tu WhatsApp.";
+  btnEl.textContent = "Conectar wallet (Trust Wallet / navegador EVM)";
+  unverifiedNoteEl.textContent =
+    "Esta pagina implementa el flujo estandar EIP-1193 (el mismo que usan MetaMask, Trust Wallet y practicamente " +
+    "toda wallet EVM), pero NO fue probada todavia contra un dispositivo Trust Wallet real. No la actives para " +
+    "usuarios reales hasta confirmarlo manualmente. IMPORTANTE: esto solo prueba que controlas esa direccion EVM " +
+    "-- NO confirma en que red EVM especifica (BSC, Ethereum, etc.) esta tu wallet, porque la firma que usamos no " +
+    "distingue eso. Chambeando igual opera ordenes y escrow unicamente en TRON.";
+  btnEl.disabled = false;
+  btnEl.addEventListener("click", handleConnectEvm);
+}
+
+function getInjectedEvmProvider() {
+  // Preferir un provider que se identifique como Trust Wallet si hay varios
+  // inyectados a la vez (convencion multi-provider legada, tipo
+  // window.ethereum.providers); si no, usar window.ethereum tal cual.
+  // ponytail: esto NO implementa el estandar moderno EIP-6963
+  // (announceProvider/eip6963:requestProvider) -- upgrade si algun dia
+  // conviven varias wallets y esta heuristica no alcanza.
+  if (typeof window.ethereum === "undefined") return null;
+  if (Array.isArray(window.ethereum.providers)) {
+    return window.ethereum.providers.find((p) => p.isTrustWallet) || window.ethereum.providers[0];
+  }
+  return window.ethereum;
+}
+
+function utf8ToHex(text) {
+  const bytes = new TextEncoder().encode(text);
+  return "0x" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function completeAuthFlow(walletAddress, signMessage) {
+  showStatus("info", `Wallet conectada: ${walletAddress}. Pidiendo nonce...`);
+  const nonceResp = await fetch(`${API_BASE_URL}/auth/nonce`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    referrerPolicy: "no-referrer",
+    body: JSON.stringify({ wallet_address: walletAddress, network_id: network }),
+  });
+  if (!nonceResp.ok) throw new Error("No se pudo obtener el nonce del servidor.");
+  const { message } = await nonceResp.json();
+
+  showStatus("info", "Confirma la firma en tu wallet (no es una transaccion, no gasta fondos)...");
+  const signature = await signMessage(message);
+
+  showStatus("info", "Verificando firma...");
+  const verifyResp = await fetch(`${API_BASE_URL}/auth/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    referrerPolicy: "no-referrer",
+    body: JSON.stringify({ wallet_address: walletAddress, signature, network_id: network }),
+  });
+  if (!verifyResp.ok) throw new Error("Firma invalida o nonce expirado.");
+  const { access_token } = await verifyResp.json();
+
+  showStatus("info", "Vinculando con tu WhatsApp...");
+  const linkResp = await fetch(`${API_BASE_URL}/whatsapp/link`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${access_token}`,
+    },
+    referrerPolicy: "no-referrer",
+    body: JSON.stringify({ link_token: linkToken, network_id: network }),
+  });
+  if (!linkResp.ok) {
+    const detail = await linkResp.json().catch(() => ({}));
+    throw new Error(detail.detail || "No se pudo completar la vinculacion.");
+  }
+
+  showStatus("ok", "Wallet vinculada correctamente. Volve a WhatsApp para continuar.");
+  btnEl.remove();
+}
+
+async function handleConnectTron() {
+  btnEl.disabled = true;
+  try {
+    if (typeof window.tronLink === "undefined" || typeof window.tronWeb === "undefined") {
+      throw new Error("No se detecto la extension TronLink. Instalala y recarga esta pagina.");
+    }
+
+    showStatus("info", "Conectando con TronLink...");
+    const res = await window.tronLink.request({ method: "tron_requestAccounts" });
+    if (res.code !== 200 && !window.tronWeb.defaultAddress?.base58) {
+      throw new Error("TronLink rechazo la conexion.");
+    }
+    const walletAddress = window.tronWeb.defaultAddress.base58;
+    if (!walletAddress) {
+      throw new Error("No se pudo leer la direccion de la wallet conectada.");
+    }
+
+    // trx.signMessageV2 (TIP-191), NO el metodo trx.sign() heredado --
+    // hallazgo de revision 2026-09-25: trx.sign() (deprecado) antepone un
+    // prefijo con una longitud de mensaje FIJA ("32"), mientras que el
+    // verificador real del backend (tronpy.keys.hash_message, ver
+    // backend/chain/tron_adapter.py) usa la longitud REAL del mensaje --
+    // para nuestro mensaje ("Chambeando login: <nonce de 32 hex>", 51
+    // caracteres) esas dos cosas NUNCA coinciden, asi que trx.sign()
+    // hubiera producido una firma que el backend siempre rechazaria.
+    // signMessageV2 usa la longitud real (documentado en
+    // tronweb.network/docu/docs/Sign%20and%20Verify%20Message), igual que
+    // el backend -- verificado con un vector cruzado tronpy/ethers.js
+    // durante la revision de esta fase.
+    await completeAuthFlow(walletAddress, (message) => window.tronWeb.trx.signMessageV2(message));
+  } catch (err) {
+    showStatus("err", err.message || String(err));
+    btnEl.disabled = false;
+  }
+}
+
+async function handleConnectEvm() {
+  btnEl.disabled = true;
+  try {
+    const provider = getInjectedEvmProvider();
+    if (!provider) {
+      throw new Error(
+        "No se detecto ninguna wallet EVM inyectada (window.ethereum). Abri esta pagina desde el navegador integrado de Trust Wallet, o instala una extension EVM."
+      );
+    }
+
+    showStatus("info", "Conectando con tu wallet...");
+    const accounts = await provider.request({ method: "eth_requestAccounts" });
+    const walletAddress = accounts && accounts[0];
+    if (!walletAddress) {
+      throw new Error("La wallet no devolvio ninguna cuenta.");
+    }
+
+    // personal_sign estandar (EIP-191), mensaje como hex UTF-8 -- la misma
+    // convencion que MetaMask/Trust Wallet/WalletConnect esperan para
+    // window.ethereum.request({method:'personal_sign'}), y la misma que
+    // verify_evm_signature exige del lado del backend (ver
+    // backend/chain/evm_adapter.py).
+    await completeAuthFlow(walletAddress, (message) =>
+      provider.request({ method: "personal_sign", params: [utf8ToHex(message), walletAddress] })
+    );
+  } catch (err) {
+    showStatus("err", err.message || String(err));
+    btnEl.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

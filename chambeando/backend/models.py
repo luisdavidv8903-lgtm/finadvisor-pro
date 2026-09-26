@@ -107,20 +107,40 @@ class UserDB(Base):
     """Identidad minima de una wallet que demostro poseer su clave privada (ver auth.py).
     Que exista un UserDB NO implica acceso al marketplace — eso requiere ademas un
     MembershipDB con status=ACTIVE. Registrarse (probar firma) y ser miembro son cosas
-    distintas a proposito: ver seccion 1 del informe de Phase 2B."""
+    distintas a proposito: ver seccion 1 del informe de Phase 2B.
+
+    `network_id` (revision 2026-09-25, autenticacion multi-red): la identidad
+    real de una wallet es el PAR (network_id, wallet_address), nunca
+    wallet_address solo -- distintas familias de cadena usan formatos de
+    direccion incompatibles (TRON base58 vs EVM hex), pero mezclarlas bajo
+    una unica clave global igual seria una decision implicita y fragil ante
+    cualquier familia futura que pudiera coincidir en formato. La unicidad
+    ahora es el UniqueConstraint compuesto de abajo, no wallet_address por
+    si sola -- ver auth.py (create_access_token/get_current_user) para como
+    se propaga esto al JWT."""
 
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("network_id", "wallet_address", name="uq_user_network_wallet"),)
+
     id = Column(Integer, primary_key=True, index=True)
-    wallet_address = Column(String, unique=True, index=True, nullable=False)  # identidad real
+    network_id = Column(String, nullable=False, index=True, default="tron")
+    wallet_address = Column(String, index=True, nullable=False)  # identidad real, unica junto con network_id
     alias = Column(String, unique=True, nullable=True)  # nombre mostrado en el marketplace — nunca la wallet completa
     created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
 
 
 class AuthNonceDB(Base):
-    """Nonce de un solo uso para el login por firma de wallet (challenge-response)."""
+    """Nonce de un solo uso para el login por firma de wallet (challenge-response).
+
+    `network_id` (revision 2026-09-25): el nonce queda atado a la red para la
+    que se emitio -- /auth/verify busca el nonce pendiente filtrando TAMBIEN
+    por network_id, nunca solo por wallet_address, para que no sea posible
+    pedir un nonce para una red y "canjearlo" bajo otra (ver
+    chain/auth_networks.py para la whitelist de redes admitidas para auth)."""
 
     __tablename__ = "auth_nonces"
     id = Column(Integer, primary_key=True, index=True)
+    network_id = Column(String, nullable=False, default="tron")
     wallet_address = Column(String, index=True, nullable=False)
     nonce = Column(String, nullable=False, unique=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)

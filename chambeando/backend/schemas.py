@@ -21,6 +21,13 @@ from .models import MemberRole, MembershipStatus, OrderStatus
 
 class NonceRequest(BaseModel):
     wallet_address: str = Field(min_length=25, max_length=64)
+    # Opcional, default None (revision 2026-09-25: autenticacion multi-red) --
+    # el router resuelve None a settings.CHAIN_ADAPTER ("tron"), exactamente
+    # el mismo default implicito que existia antes de esta revision, para que
+    # ningun cliente legado (o test existente) que no lo envie deje de
+    # funcionar. Ver chain/auth_networks.py para la whitelist de redes
+    # admitidas -- una red desconocida o no admitida falla cerrado (400).
+    network_id: str | None = None
 
 
 class NonceResponse(BaseModel):
@@ -31,6 +38,11 @@ class NonceResponse(BaseModel):
 class VerifyRequest(BaseModel):
     wallet_address: str = Field(min_length=25, max_length=64)
     signature: str
+    # Mismo default/resolucion que NonceRequest.network_id -- DEBE resolver
+    # a la misma red que se uso en /auth/nonce para esta wallet, o la
+    # busqueda del nonce pendiente (filtrada tambien por network_id) no
+    # encuentra nada (ver auth.verify_and_consume_nonce).
+    network_id: str | None = None
 
 
 class TokenResponse(BaseModel):

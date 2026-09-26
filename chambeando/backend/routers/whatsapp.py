@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_authenticated_network, get_current_user
 from ..messaging import get_conversation_router
 from ..messaging.identity import LinkTokenError, consume_link_token
 from ..messaging.meta_envelope import MetaWebhookEnvelope, parse_meta_webhook_envelope
@@ -121,26 +121,49 @@ def link_whatsapp_identity(
     payload: WhatsAppLinkRequest,
     db: Session = Depends(get_db),
     current_user: UserDB = Depends(get_current_user),
+    authenticated_network: str = Depends(get_authenticated_network),
 ):
     """Called by the (mocked, in this phase) wallet-signing web page AFTER
     the user already completed the normal /auth/nonce + /auth/verify flow --
     get_current_user is the SAME dependency every other authenticated route
     uses; this endpoint proves nothing about wallet ownership itself, it only
     binds an already-proven identity to the WhatsApp id that issued the
-    link_token (see messaging/identity.py)."""
+    link_token (see messaging/identity.py).
+
+    `authenticated_network` (revision 2026-09-25) closes a gap
+    `payload.network_id` alone left open: that field is just a CLIENT
+    ASSERTION echoed back from the deep link, and consume_link_token() only
+    ever checked it against link_token_network_id -- it never checked
+    against what network the CURRENT JWT actually proved. A client could in
+    principle authenticate on network A and then assert network_id=B in this
+    body, matching a link_token genuinely issued for B, without ever having
+    proven ownership of a B-family wallet at all. Comparing
+    authenticated_network (read straight from the signed JWT, never
+    client-suppliable) against payload.network_id closes that -- both must
+    agree, on top of consume_link_token()'s existing link_token_network_id
+    check, before any linking happens."""
+    if authenticated_network != payload.network_id:
+        raise HTTPException(
+            status_code=400,
+            detail="network mismatch: the authenticated session's network does not match the network requested for this link",
+        )
     try:
         link = consume_link_token(db, payload.link_token, current_user, network_id=payload.network_id)
+        log_security_event(
+            db,
+            action=SecurityEventType.WHATSAPP_ACCOUNT_LINKED,
+            actor_user_id=current_user.id,
+            target_type="whatsapp_link",
+            target_id=str(link.id),
+        )
+        db.commit()
     except LinkTokenError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.reason)
-
-    log_security_event(
-        db,
-        action=SecurityEventType.WHATSAPP_ACCOUNT_LINKED,
-        actor_user_id=current_user.id,
-        target_type="whatsapp_link",
-        target_id=str(link.id),
-    )
-    db.commit()
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=exc.reason) from exc
+    except Exception:
+        # Includes audit flush/commit failures: preserve the token for retry.
+        db.rollback()
+        raise
 
     get_conversation_router().notify_link_complete(db, link.whatsapp_id)
 

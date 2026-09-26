@@ -25,6 +25,7 @@ __all__ = [
     "get_chain_adapter",
     "build_adapter_for_network",
     "reset_network_adapters_for_tests",
+    "verify_wallet_signature_for_auth",
 ]
 
 _adapter: EscrowChainAdapter | None = None
@@ -107,6 +108,26 @@ def reset_network_adapters_for_tests() -> None:
     """Solo para tests: limpia la cache de adaptadores por-network (analogo a
     reset_chain_adapter_for_tests, pero para la ruta nueva basada en registry)."""
     _network_adapters.clear()
+
+
+def verify_wallet_signature_for_auth(chain_family: ChainFamily, address: str, message: str, signature: str) -> bool:
+    """Verificacion de firma PURA para autenticacion-solamente (revision
+    2026-09-25, ver chain/auth_networks.py) -- llama directamente
+    verify_tron_signature/verify_evm_signature, las mismas funciones puras
+    de modulo que ya usan TronEscrowAdapter/EvmEscrowAdapter internamente,
+    pero SIN construir ningun adapter: sin RPC, sin contrato, sin
+    NetworkConfig. Los imports de tronpy/eth_account quedan perezosos aqui
+    tambien (dentro de cada funcion pura), preservando la regla de
+    aislamiento de test_chain_separation.py."""
+    if chain_family == ChainFamily.TRON:
+        from .tron_adapter import verify_tron_signature
+
+        return verify_tron_signature(address, message, signature)
+    if chain_family == ChainFamily.EVM:
+        from .evm_adapter import verify_evm_signature
+
+        return verify_evm_signature(address, message, signature)
+    raise NotImplementedError(f"no hay verificacion de firma pura implementada para chain_family={chain_family!r}")
 
 
 def reset_chain_adapter_for_tests() -> None:

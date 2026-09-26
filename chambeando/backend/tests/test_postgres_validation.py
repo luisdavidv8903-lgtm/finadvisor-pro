@@ -573,14 +573,14 @@ def test_nonce_expiration_same_decision_as_sqlite(pg_session):
     from backend.auth import generate_nonce, verify_and_consume_nonce
     from backend.models import AuthNonceDB
 
-    nonce_ok = generate_nonce(pg_session, "TFakePgNonceOk0000001")
-    assert verify_and_consume_nonce(pg_session, "TFakePgNonceOk0000001", nonce_ok) is True
+    nonce_ok = generate_nonce(pg_session, "TFakePgNonceOk0000001", "tron")
+    assert verify_and_consume_nonce(pg_session, "TFakePgNonceOk0000001", "tron", nonce_ok) is True
 
-    nonce_expired = generate_nonce(pg_session, "TFakePgNonceExpired001")
+    nonce_expired = generate_nonce(pg_session, "TFakePgNonceExpired001", "tron")
     entry = pg_session.query(AuthNonceDB).filter_by(nonce=nonce_expired).first()
     entry.expires_at = entry.expires_at - timedelta(hours=1000)
     pg_session.commit()
-    assert verify_and_consume_nonce(pg_session, "TFakePgNonceExpired001", nonce_expired) is False
+    assert verify_and_consume_nonce(pg_session, "TFakePgNonceExpired001", "tron", nonce_expired) is False
 
 
 def test_invite_expiration_same_decision_as_sqlite(pg_session):

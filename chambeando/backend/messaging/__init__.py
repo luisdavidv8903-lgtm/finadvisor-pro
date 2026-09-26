@@ -55,12 +55,17 @@ def get_conversation_router() -> ConversationRouter:
     if _router is None:
         from ..config import settings
 
-        # Phase 2D.1 section 11: no genuine HTTPS Chambeando test endpoint
-        # exists yet -- keep the real wallet-signing handoff disabled
-        # whenever the real Meta transport is selected, regardless of
-        # whether credentials are configured.
-        wallet_handoff_enabled = settings.WHATSAPP_PROVIDER != "meta"
-        _router = ConversationRouter(WhatsAppAdapter(_build_default_client()), wallet_handoff_enabled=wallet_handoff_enabled)
+        # Revision 2026-09-25: WALLET_HANDOFF_ENABLED es su propia variable,
+        # separada de WHATSAPP_PROVIDER -- activar el transporte real de Meta
+        # (mensajeria) nunca activa por si solo el handoff de firma de
+        # wallet. Default False (ver config.py) hasta que el dApp HTTPS real
+        # exista y este probado; DAPP_BASE_URL nunca aparenta ser un dominio
+        # real por defecto.
+        _router = ConversationRouter(
+            WhatsAppAdapter(_build_default_client()),
+            dapp_base_url=settings.DAPP_BASE_URL,
+            wallet_handoff_enabled=settings.WALLET_HANDOFF_ENABLED,
+        )
     return _router
 
 

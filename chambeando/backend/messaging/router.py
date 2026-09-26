@@ -25,6 +25,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .. import timeutils
+from ..chain.networks import is_operational
 from ..config import settings
 from ..deps import get_current_membership
 from ..models import ConversationSessionDB, ConversationState, MembershipStatus, OrderStatus, P2POrderDB
@@ -93,7 +94,20 @@ class ConversationRouter:
 
         dispatch = {
             "START": self._handle_start,
+            # JOIN (heredado, sin cambios de comportamiento -- revision
+            # 2026-09-25): sigue emitiendo un link_token para
+            # settings.CHAIN_ADAPTER ("tron"), exactamente como siempre.
+            # JOIN EVM (nuevo, mismo alias sin espacio que ya existe para
+            # "MY TRADES"/"MYTRADES") es la unica forma explicita de pedir
+            # un enlace de autenticacion para una wallet EVM -- ver
+            # _handle_join_evm. Nombrado "EVM", no "BSC": personal_sign no
+            # liga la firma a ninguna cadena EVM especifica (ver
+            # chain/auth_networks.py, EVM_AUTH_ONLY_LIMITATIONS) -- llamarlo
+            # "JOIN BSC" habria afirmado una verificacion de BSC que el
+            # sistema no hace.
             "JOIN": self._handle_join,
+            "JOIN EVM": self._handle_join_evm,
+            "JOINEVM": self._handle_join_evm,
             "MENU": self._handle_menu,
             "HELP": lambda db, wid, s: self._send(wid, HELP_TEXT),
             "BUY": self._handle_buy,
@@ -148,10 +162,43 @@ class ConversationRouter:
         rule the HTTP API enforces (no membership -> 403, suspended -> 403),
         just invoked as a plain function with real arguments instead of
         FastAPI dependency injection. Returns (user, membership) or None
-        (having already sent the appropriate safe denial message)."""
+        (having already sent the appropriate safe denial message).
+
+        Product limit (revision 2026-09-25, explicit correction): a wallet
+        linked for AUTHENTICATION on a network/family that has no
+        operational escrow (e.g. "evm" -- see chain/auth_networks.py,
+        deliberately separate from this check) can prove identity but can
+        never actually complete a TRON order/escrow transaction with that
+        same address -- the two chain families are not interchangeable.
+        Every trading command (BUY/SELL/MY TRADES/DISPUTE) routes through
+        this SAME choke point, so gating here blocks the handoff everywhere
+        at once instead of relying on each handler to remember to check --
+        `chain.networks.is_operational` is the OPERATIONAL gate (order/
+        escrow capability), intentionally not the auth-only gate.
+
+        `is_operational` looks up `user.network_id` in the OPERATIONAL
+        registry (chain/networks.py) -- "evm" (the auth-only chain-FAMILY
+        identity, see chain/auth_networks.py) deliberately has NO entry
+        there at all (it isn't tied to any specific EVM chain), so
+        `get_network("evm")` raises ValueError. That is correctly treated
+        as "not operational" here -- an unknown-to-the-operational-registry
+        network can never be operational by definition, fail closed rather
+        than letting the exception escape."""
         user = identity.get_linked_user(db, whatsapp_id)
         if user is None:
             self._send(whatsapp_id, "Todavia no vinculaste tu wallet. Escribi JOIN para empezar.")
+            return None
+        try:
+            operational = is_operational(user.network_id)
+        except ValueError:
+            operational = False
+        if not operational:
+            self._send(
+                whatsapp_id,
+                f"Tu wallet esta vinculada para autenticacion (red/familia '{user.network_id}'), pero Chambeando "
+                "todavia opera ordenes y escrow SOLO en TRON. Con esta identidad podes iniciar sesion, pero no "
+                "podes comprar ni vender -- esa wallet nunca puede firmar una transaccion de escrow TRON.",
+            )
             return None
         try:
             membership = get_current_membership(current_user=user, db=db)
@@ -175,20 +222,67 @@ class ConversationRouter:
         )
 
     def _handle_join(self, db: Session, whatsapp_id: str, session: ConversationSessionDB) -> None:
+        """JOIN heredado -- SIN cambios de comportamiento respecto a antes de
+        la revision 2026-09-25: sigue emitiendo un link_token para
+        settings.CHAIN_ADAPTER ("tron"), mismo texto, mismo flujo. Ver
+        _handle_join_evm para el comando nuevo."""
+        self._handle_join_for_network(
+            db,
+            whatsapp_id,
+            session,
+            network_id=settings.CHAIN_ADAPTER,
+            intro_text="Primero necesitamos verificar tu wallet (nunca compartas tu clave privada). Abri este link para firmar:",
+        )
+
+    def _handle_join_evm(self, db: Session, whatsapp_id: str, session: ConversationSessionDB) -> None:
+        """JOIN EVM (revision 2026-09-25, renombrado desde "JOIN BSC" por un
+        hallazgo de revision posterior): la unica forma explicita de pedir
+        un enlace de autenticacion para una wallet EVM (Trust Wallet u
+        otra). Usa EXCLUSIVAMENTE el gate de auth (chain/auth_networks.py,
+        network_id="evm", via issue_link_token -> _resolve_and_require_linkable_network)
+        -- ninguna cadena EVM especifica (bsc, ethereum, ...) se activa en
+        chain/networks.py para adapters/ordenes/escrow, sin excepcion.
+
+        Por que "EVM" y no "BSC": `personal_sign` (lo unico que esta pagina
+        pide firmar) no liga la firma a ninguna cadena EVM especifica -- la
+        wallet puede tener seleccionada BSC, Ethereum o cualquier otra red
+        EVM y produce exactamente la misma firma valida. Decir "BSC" aqui
+        seria afirmar una verificacion que el sistema no hace (ver
+        chain/auth_networks.py:EVM_AUTH_ONLY_LIMITATIONS para el detalle
+        completo). El texto aclara esto ANTES de que el usuario firme (ver
+        tambien el bloqueo posterior en _require_linked_member, que es el
+        que realmente impide operar con esta identidad)."""
+        self._handle_join_for_network(
+            db,
+            whatsapp_id,
+            session,
+            network_id="evm",
+            intro_text=(
+                "Vamos a verificar que controlas una wallet EVM (por ejemplo Trust Wallet), solo para iniciar "
+                "sesion -- nunca compartas tu clave privada. IMPORTANTE: esto prueba que tenes esa direccion, "
+                "pero NO confirma en que red EVM especifica esta tu wallet (BSC, Ethereum, etc.) -- Chambeando "
+                "todavia opera ordenes y escrow SOLO en TRON, y esta wallet no va a poder usarse para comprar "
+                "ni vender. Abri este link para firmar:"
+            ),
+        )
+
+    def _handle_join_for_network(
+        self,
+        db: Session,
+        whatsapp_id: str,
+        session: ConversationSessionDB,
+        network_id: str,
+        intro_text: str,
+    ) -> None:
         user = identity.get_linked_user(db, whatsapp_id)
         if user is None:
-            # network_id defaults inside issue_link_token to settings.CHAIN_ADAPTER
-            # (today's only real network) -- passed explicitly here so the deep
-            # link's querystring and the token's server-side binding always agree.
-            network_id = settings.CHAIN_ADAPTER
+            # network_id se pasa explicito (nunca None) para que el
+            # querystring del deep link y el binding server-side del token
+            # siempre coincidan -- ver identity.issue_link_token.
             token = identity.issue_link_token(db, whatsapp_id, settings.WHATSAPP_LINK_TOKEN_EXPIRE_SECONDS, network_id=network_id)
             link_url = f"{self._dapp_base_url}/link?token={token}&network={network_id}"
             self._set_state(db, session, ConversationState.AWAITING_LINK, context={})
-            self._send_handoff(
-                whatsapp_id,
-                "Primero necesitamos verificar tu wallet (nunca compartas tu clave privada). Abri este link para firmar:",
-                link_url,
-            )
+            self._send_handoff(whatsapp_id, intro_text, link_url)
             return
 
         self._send_post_link_status(db, whatsapp_id, session, user)

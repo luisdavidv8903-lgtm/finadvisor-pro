@@ -12,12 +12,13 @@ listado) es 403, nunca "dejar pasar por si acaso".
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from .auth import get_current_user  # re-exportado para import consistente desde routers
+from .auth import get_authenticated_network, get_current_user  # re-exportado para import consistente desde routers
 from .database import get_db
 from .models import MemberRole, MembershipDB, MembershipStatus, UserDB
 
 __all__ = [
     "get_current_user",
+    "get_authenticated_network",
     "get_current_membership",
     "require_role",
 ]

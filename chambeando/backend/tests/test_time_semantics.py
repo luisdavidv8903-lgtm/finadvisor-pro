@@ -88,20 +88,20 @@ def test_nonce_valid_exactly_at_expiry_boundary_is_accepted(db_session, monkeypa
     # mantener el "now" congelado siempre aware, igual que en produccion.
     expires_at = FIXED_NOW + timedelta(seconds=settings.NONCE_EXPIRE_SECONDS)
     _freeze(monkeypatch, FIXED_NOW)
-    nonce = generate_nonce(db_session, "0xNonceBoundary1")
+    nonce = generate_nonce(db_session, "0xNonceBoundary1", "tron")
 
     # el momento exacto de expiracion es INCLUSIVO (expires_at >= now en auth.py)
     _freeze(monkeypatch, expires_at)
-    assert verify_and_consume_nonce(db_session, "0xNonceBoundary1", nonce) is True
+    assert verify_and_consume_nonce(db_session, "0xNonceBoundary1", "tron", nonce) is True
 
 
 def test_nonce_one_microsecond_past_expiry_is_rejected(db_session, monkeypatch):
     expires_at = FIXED_NOW + timedelta(seconds=settings.NONCE_EXPIRE_SECONDS)
     _freeze(monkeypatch, FIXED_NOW)
-    nonce = generate_nonce(db_session, "0xNonceBoundary2")
+    nonce = generate_nonce(db_session, "0xNonceBoundary2", "tron")
 
     _freeze(monkeypatch, expires_at + timedelta(microseconds=1))
-    assert verify_and_consume_nonce(db_session, "0xNonceBoundary2", nonce) is False
+    assert verify_and_consume_nonce(db_session, "0xNonceBoundary2", "tron", nonce) is False
 
 
 def test_nonce_comparison_never_raises_naive_aware_typeerror(db_session, monkeypatch):
@@ -109,9 +109,9 @@ def test_nonce_comparison_never_raises_naive_aware_typeerror(db_session, monkeyp
     # de SQLite, naive) contra `now` (aware) en la evaluacion Python interna de
     # synchronize_session=False — esto NO debe lanzar TypeError.
     _freeze(monkeypatch, FIXED_NOW)
-    nonce = generate_nonce(db_session, "0xNonceNoTypeError")
+    nonce = generate_nonce(db_session, "0xNonceNoTypeError", "tron")
     _freeze(monkeypatch, FIXED_NOW + timedelta(seconds=30))
-    verify_and_consume_nonce(db_session, "0xNonceNoTypeError", nonce)  # no debe lanzar
+    verify_and_consume_nonce(db_session, "0xNonceNoTypeError", "tron", nonce)  # no debe lanzar
 
 
 # ---------------------------------------------------------------------------

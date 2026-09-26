@@ -68,9 +68,9 @@ def test_reused_nonce_rejected_at_unit_level(db_session):
     puede consumir dos veces, sin pasar por HTTP."""
     from backend.config import settings
 
-    nonce = auth_module.generate_nonce(db_session, WALLET)
-    first = auth_module.verify_and_consume_nonce(db_session, WALLET, nonce)
-    second = auth_module.verify_and_consume_nonce(db_session, WALLET, nonce)
+    nonce = auth_module.generate_nonce(db_session, WALLET, "tron")
+    first = auth_module.verify_and_consume_nonce(db_session, WALLET, "tron", nonce)
+    second = auth_module.verify_and_consume_nonce(db_session, WALLET, "tron", nonce)
     assert first is True
     assert second is False
 

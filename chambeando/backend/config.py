@@ -78,5 +78,20 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str | None = None
     RATE_LIMIT_TELEGRAM_MESSAGE_PER_MINUTE: int = 20
 
+    # Wallet-signing handoff (Fase de vinculacion segura, revision 2026-09-25).
+    # Antes vivia implicito en WHATSAPP_PROVIDER ("meta" => siempre False, sin
+    # variable propia) -- eso acoplaba dos decisiones independientes ("¿mando
+    # mensajes reales por Meta?" y "¿ya existe un dApp HTTPS real para
+    # firmar?"). Ahora son dos flags separados: activar Meta real NUNCA
+    # habilita el handoff por si solo. Default False (fail-closed) en ambos
+    # casos -- activar el handoff es una decision humana explicita, nunca un
+    # efecto colateral de otra config.
+    WALLET_HANDOFF_ENABLED: bool = False
+    # Dominio local de desarrollo, nunca un placeholder que aparente ser un
+    # servicio real (ver revision: "sin dominio ficticio operativo"). Un
+    # deploy real DEBE sobreescribir esto con el HTTPS real del dApp antes de
+    # que WALLET_HANDOFF_ENABLED tenga algun efecto util.
+    DAPP_BASE_URL: str = "http://localhost:5173/app"
+
 
 settings = Settings()

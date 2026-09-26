@@ -43,13 +43,34 @@ def test_no_tronpy_imports_outside_tron_adapter():
     codigo de negocio (routers/services/models/auth.py siguen sin poder
     importar tronpy) -- son exactamente la misma excepcion que
     test_tron_signature_real.py ya establecio, no una violacion de la
-    separacion chain-agnostic del backend en si."""
+    separacion chain-agnostic del backend en si.
+
+    test_wallet_link_two_identities_real_crypto.py (Fase de vinculacion
+    segura, revision 2026-09-25) es la misma excepcion aplicada al flujo
+    /whatsapp/link: necesita firmar como dos wallets TRON reales distintas
+    para probar el vinculo de red, expiracion/reuso/intercambio de tokens y
+    el rechazo de una segunda wallet.
+
+    test_join_flow_network_consistency.py (revision de seguridad,
+    2026-09-25) es la misma excepcion aplicada a un JOIN real de punta a
+    punta: necesita firmar con una clave TRON real para seguir el deep link
+    que el router realmente produce, no un atajo.
+
+    test_join_evm_command.py (comando JOIN EVM, renombrado desde "JOIN BSC"
+    -- ver backend/chain/auth_networks.py:EVM_AUTH_ONLY_LIMITATIONS) es la
+    misma excepcion aplicada al control de rechazo TRON<->EVM: necesita
+    firmar con una clave TRON real para probar que un link_token de JOIN
+    (tron) real se rechaza con un JWT autenticado de verdad en evm, y
+    viceversa."""
     offenders = _files_importing_tronpy()
     allowed = {
         BACKEND_ROOT / "chain" / "tron_adapter.py",
         BACKEND_ROOT / "tests" / "test_tron_signature_real.py",
         BACKEND_ROOT / "tests" / "test_e2e_full_flow.py",
         BACKEND_ROOT / "tests" / "test_e2e_postgres.py",
+        BACKEND_ROOT / "tests" / "test_wallet_link_two_identities_real_crypto.py",
+        BACKEND_ROOT / "tests" / "test_join_flow_network_consistency.py",
+        BACKEND_ROOT / "tests" / "test_join_evm_command.py",
         BACKEND_ROOT / "demo_e2e.py",
     }
     unexpected = [p for p in offenders if p not in allowed]
