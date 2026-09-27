@@ -101,6 +101,18 @@ class SecurityEventType(str, Enum):
     TELEGRAM_OFFER_CREATED = "telegram_offer_created"
     TELEGRAM_OFFER_MATCHED = "telegram_offer_matched"
     TELEGRAM_OFFER_STATUS_CHANGED = "telegram_offer_status_changed"
+    VIP_WHATSAPP_ID_AUTHORIZED = "vip_whatsapp_id_authorized"
+    VIP_INVITE_CREATED = "vip_invite_created"
+    VIP_INVITE_REDEEMED = "vip_invite_redeemed"
+    VIP_MEMBERSHIP_REVOKED = "vip_membership_revoked"
+    VIP_OFFER_CREATED = "vip_offer_created"
+    VIP_OFFER_CLOSED = "vip_offer_closed"
+    VIP_OFFER_INTEREST_REGISTERED = "vip_offer_interest_registered"
+    VIP_OUTBOUND_DELIVERY_UNCERTAIN = "vip_outbound_delivery_uncertain"
+    VIP_OUTBOUND_DELIVERY_FAILED_TERMINAL = "vip_outbound_delivery_failed_terminal"
+    TELEGRAM_VIP_OUTBOUND_DELIVERY_UNCERTAIN = "telegram_vip_outbound_delivery_uncertain"
+    TELEGRAM_VIP_OUTBOUND_DELIVERY_FAILED_TERMINAL = "telegram_vip_outbound_delivery_failed_terminal"
+    TELEGRAM_VIP_OUTBOUND_DELIVERY_FAILED_PERMANENT = "telegram_vip_outbound_delivery_failed_permanent"
 
 
 class UserDB(Base):
@@ -393,10 +405,14 @@ class ConversationSessionDB(Base):
 
 
 class Channel(str, Enum):
-    """Extensible on purpose (WhatsApp could migrate to this later), but only
-    TELEGRAM is used in V1 -- WhatsAppLinkDB stays untouched and unrelated."""
+    """WHATSAPP added for the VIP WhatsApp offer-board pilot (separate from
+    WhatsAppLinkDB, which stays untouched and unrelated -- that table is the
+    wallet-linking identity for the escrow/marketplace flow; ChannelIdentityDB
+    rows with channel=WHATSAPP are a completely different, wallet-free
+    identity used only by whatsapp_vip_router.py)."""
 
     TELEGRAM = "telegram"
+    WHATSAPP = "whatsapp"
 
 
 class OfferSide(str, Enum):
@@ -527,3 +543,321 @@ class ProcessedWebhookEventDB(Base):
     provider = Column(String, nullable=False, default="whatsapp")
     message_id = Column(String, nullable=False)
     processed_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp VIP offer-board pilot -- completely separate from the wallet/
+# escrow flow above (WhatsAppLinkDB, ConversationSessionDB, P2POrderDB).
+# No wallet, no escrow, no P2POrderDB reference anywhere below. Access is
+# NEVER auto-granted by talking to the bot -- see WhatsAppVipMembershipDB's
+# docstring and services/whatsapp_vip_identity.py.
+# ---------------------------------------------------------------------------
+
+
+class VipAuthorizationMethod(str, Enum):
+    DIRECT = "direct"  # operator authorized this exact WhatsApp id out of band
+    INVITE = "invite"  # redeemed a single-use WhatsAppVipInviteDB code
+
+
+class WhatsAppVipInviteDB(Base):
+    """Single-use (by default) invite code for the VIP pilot -- same
+    hash-only discipline as InviteDB (the plaintext code is returned once, at
+    creation, by vip_admin.py, and never persisted). Deliberately NOT the
+    same table as InviteDB: that one is wallet/UserDB-keyed and redeeming it
+    goes through services/invites.py's wallet-authenticated flow, which this
+    pilot explicitly must not touch."""
+
+    __tablename__ = "whatsapp_vip_invites"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code_hash = Column(String, unique=True, index=True, nullable=False)
+    max_uses = Column(Integer, nullable=False, default=1)
+    used_count = Column(Integer, nullable=False, default=0)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    note = Column(String, nullable=True)  # operator's own label, e.g. "for Maria - group VIP"
+    created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+
+
+class WhatsAppVipMembershipDB(Base):
+    """The ONLY gate for every VIP command (OFERTA/OFERTAS/MIS OFERTAS/ME
+    INTERESA/CERRAR). Created EXCLUSIVELY by vip_admin.py (authorize_whatsapp_id,
+    a local operator-run script -- never reachable from chat) or by redeeming
+    a WhatsAppVipInviteDB code via the VIP <code> chat command. Receiving an
+    inbound webhook message from a whatsapp_id proves nothing about group
+    membership by itself -- this row is the only thing that does."""
+
+    __tablename__ = "whatsapp_vip_memberships"
+    __table_args__ = (UniqueConstraint("channel_identity_id", name="uq_vip_membership_identity"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    channel_identity_id = Column(Integer, ForeignKey("channel_identities.id"), nullable=False, index=True)
+    status = Column(SQLEnum(MembershipStatus, create_constraint=True, validate_strings=True), nullable=False, default=MembershipStatus.ACTIVE)
+    authorized_via = Column(SQLEnum(VipAuthorizationMethod, create_constraint=True, validate_strings=True), nullable=False)
+    invite_id = Column(Integer, ForeignKey("whatsapp_vip_invites.id"), nullable=True)
+    authorized_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoke_reason = Column(String, nullable=True)
+
+
+class VipOfferIntent(str, Enum):
+    COMPRO = "compro"
+    VENDO = "vendo"
+    CAMBIO = "cambio"
+
+
+class VipCurrency(str, Enum):
+    """Closed catalog observed in the VIP chat evidence (CHAMBEANDO_VIP_OFERTAS_V1.md).
+    Deliberately does NOT include 'CLM'/'C' or USDT -- unconfirmed/out-of-scope
+    per that document; adding a currency here is a deliberate product decision,
+    never a side effect of a user typing something new."""
+
+    USD = "USD"
+    CUP = "CUP"
+    EUR = "EUR"
+    MLC = "MLC"
+    MXN = "MXN"
+
+
+class VipSettlementMethod(str, Enum):
+    CASH = "cash"
+    TRANSFER = "transfer"
+    ZELLE = "zelle"
+    MLC_BALANCE = "mlc_balance"
+    OTHER = "other"  # requires *_method_detail to be set (short free text)
+
+
+class VipOfferStatus(str, Enum):
+    """BORRADOR/ACTIVA/CERRADA/CADUCADA from the source document, in the
+    English-enum-value convention this codebase already uses elsewhere
+    (OfferStatus, OrderStatus)."""
+
+    DRAFT = "draft"
+    ACTIVE = "active"
+    CLOSED = "closed"
+    EXPIRED = "expired"
+
+
+class VipWizardState(str, Enum):
+    """Every step of the guided CREAR OFERTA flow -- one question per state,
+    nothing inferred, nothing skipped. OFERTAS/MIS OFERTAS/ME INTERESA <id>/
+    CERRAR <id> are all single-shot stateless commands (no state needed) --
+    only offer CREATION is multi-step."""
+
+    IDLE = "idle"
+    WIZ_INTENT = "wiz_intent"
+    WIZ_GIVE_CURRENCY = "wiz_give_currency"
+    WIZ_RECEIVE_CURRENCY = "wiz_receive_currency"
+    WIZ_AMOUNT = "wiz_amount"
+    WIZ_RATE_UNIT = "wiz_rate_unit"
+    WIZ_RATE_VALUE = "wiz_rate_value"
+    WIZ_GIVE_METHOD = "wiz_give_method"
+    WIZ_GIVE_METHOD_OTHER = "wiz_give_method_other"
+    WIZ_GIVE_LOCATION = "wiz_give_location"
+    WIZ_RECEIVE_METHOD = "wiz_receive_method"
+    WIZ_RECEIVE_METHOD_OTHER = "wiz_receive_method_other"
+    WIZ_RECEIVE_LOCATION = "wiz_receive_location"
+    WIZ_DURATION = "wiz_duration"
+    WIZ_CONFIRM = "wiz_confirm"
+
+
+class WhatsAppVipSessionDB(Base):
+    """Server-side wizard state per VIP channel identity -- same role as
+    TelegramSessionDB/ConversationSessionDB, kept separate because this
+    domain (offer-board, no wallet) and its state enum are entirely
+    different from both."""
+
+    __tablename__ = "whatsapp_vip_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    channel_identity_id = Column(Integer, ForeignKey("channel_identities.id"), unique=True, nullable=False, index=True)
+    state = Column(SQLEnum(VipWizardState, create_constraint=True, validate_strings=True), nullable=False, default=VipWizardState.IDLE)
+    context = Column(String, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=timeutils.utcnow, onupdate=timeutils.utcnow)
+
+
+class WhatsAppVipOfferDB(Base):
+    """Off-chain VIP offer-board announcement. NEVER a P2POrderDB, NEVER
+    custody, NEVER escrow -- give_/receive_ method+location are plain
+    descriptive text/enum, exactly like P2POfferDB.settlement_method (never
+    an account/card number -- that would belong in SettlementDetailDB's
+    encrypted payload, which this table must never grow a field resembling).
+
+    `source_message_id` is the inbound WhatsApp message id (wamid) whose
+    CONFIRMAR triggered this row's creation -- a unique constraint on it is
+    what makes offer creation itself idempotent under webhook redelivery
+    (see routers/whatsapp.py's transaction-ordering fix and
+    services/whatsapp_vip_offers.create_offer)."""
+
+    __tablename__ = "whatsapp_vip_offers"
+    __table_args__ = (UniqueConstraint("source_message_id", name="uq_vip_offer_source_message"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    channel_identity_id = Column(Integer, ForeignKey("channel_identities.id"), nullable=False, index=True)
+
+    intent = Column(SQLEnum(VipOfferIntent, create_constraint=True, validate_strings=True), nullable=False)
+    give_currency = Column(SQLEnum(VipCurrency, create_constraint=True, validate_strings=True), nullable=False)
+    receive_currency = Column(SQLEnum(VipCurrency, create_constraint=True, validate_strings=True), nullable=False)
+    amount = Column(Numeric(18, 2), nullable=False)
+    min_amount = Column(Numeric(18, 2), nullable=True)
+
+    # Fixed rate only in V1 (percentage explicitly deferred -- see
+    # services/whatsapp_vip_offers.py). rate_currency is ALWAYS one of
+    # give_currency/receive_currency, confirmed explicitly by the user during
+    # the wizard (WIZ_RATE_UNIT) -- never inferred/assumed by the bot.
+    rate_value = Column(Numeric(18, 4), nullable=False)
+    rate_currency = Column(SQLEnum(VipCurrency, create_constraint=True, validate_strings=True), nullable=False)
+
+    give_method = Column(SQLEnum(VipSettlementMethod, create_constraint=True, validate_strings=True), nullable=False)
+    give_method_detail = Column(String, nullable=True)
+    give_location = Column(String, nullable=False)
+    receive_method = Column(SQLEnum(VipSettlementMethod, create_constraint=True, validate_strings=True), nullable=False)
+    receive_method_detail = Column(String, nullable=True)
+    receive_location = Column(String, nullable=False)
+
+    duration_hours = Column(Integer, nullable=False)  # 24 (default) or 72 -- see WIZ_DURATION
+    status = Column(SQLEnum(VipOfferStatus, create_constraint=True, validate_strings=True), nullable=False, default=VipOfferStatus.ACTIVE, index=True)
+    source_message_id = Column(String, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=timeutils.utcnow, onupdate=timeutils.utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class WhatsAppVipOfferInterestDB(Base):
+    """'ME INTERESA <id>' -- registered once per (offer, interested person),
+    DB-enforced (same unique-constraint-is-the-real-guarantee pattern as
+    ProcessedWebhookEventDB). Never stores/publishes the interested party's
+    whatsapp_id to anyone but the offer owner's own notification."""
+
+    __tablename__ = "whatsapp_vip_offer_interests"
+    __table_args__ = (UniqueConstraint("offer_id", "interested_channel_identity_id", name="uq_vip_offer_interest"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    offer_id = Column(Integer, ForeignKey("whatsapp_vip_offers.id"), nullable=False, index=True)
+    interested_channel_identity_id = Column(Integer, ForeignKey("channel_identities.id"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+
+
+class OutboundMessageStatus(str, Enum):
+    """See services/whatsapp_outbox.py module docstring for the full state
+    machine and the documented delivery-uncertainty window. Never treat
+    META_ACCEPTED as proof of DELIVERED -- those are deliberately different
+    states, only the latter is set from a real Meta status webhook."""
+
+    PENDING = "pending"
+    SENDING = "sending"
+    META_ACCEPTED = "meta_accepted"
+    DELIVERED = "delivered"
+    FAILED_RETRYABLE = "failed_retryable"
+    FAILED_TERMINAL = "failed_terminal"
+    UNCERTAIN_NEEDS_RECONCILIATION = "uncertain_needs_reconciliation"
+
+
+class OutboundMessageDB(Base):
+    """The outbox: every VIP-flow outbound reply is persisted here BEFORE
+    being attempted, so a crash/restart can always recover 'we owed this
+    person a reply' without re-running the inbound handler (see
+    services/whatsapp_outbox.py). Channel-agnostic in shape (whatsapp_id is
+    just an opaque recipient id) but only used by the WhatsApp VIP flow in
+    V1 -- the existing wallet-flow ConversationRouter still calls
+    adapter.send() directly, unchanged, out of this iteration's scope."""
+
+    __tablename__ = "whatsapp_outbound_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    whatsapp_id = Column(String, nullable=False, index=True)
+    body_text = Column(String, nullable=False)
+    status = Column(SQLEnum(OutboundMessageStatus, create_constraint=True, validate_strings=True), nullable=False, default=OutboundMessageStatus.PENDING, index=True)
+    wamid = Column(String, unique=True, nullable=True, index=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(String, nullable=True)  # sanitized only -- exception type / Meta numeric error code, never a raw body
+    source_message_id = Column(String, nullable=True, index=True)  # the inbound wamid that caused this reply, for observability only (not an idempotency key here)
+    created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=timeutils.utcnow, onupdate=timeutils.utcnow)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class OutboxWorkerLeaseDB(Base):
+    """Lease rows so periodic outbox sweeps stay single-worker-responsible
+    even if this process is ever scaled to more than one instance (V1
+    deployment is a single systemd process, where this is a no-op formality
+    every tick wins -- see SERVER_DEPLOYMENT_RUNBOOK.md). Acquired via an
+    atomic compare-and-swap UPDATE, the same idiom already used elsewhere in
+    this codebase's audited services for atomic balance/state updates --
+    never a naive read-then-write.
+
+    id=1 is the WhatsApp VIP outbox's lease (see services/whatsapp_outbox.py).
+    id=2 is the Telegram VIP outbox's lease (services/telegram_outbox.py,
+    2026-09-27) -- a separate row in the SAME table rather than a second
+    table, since both are the identical single-row-per-worker-domain shape;
+    the two sweeps never contend with each other's row."""
+
+    __tablename__ = "whatsapp_outbox_worker_lease"
+
+    id = Column(Integer, primary_key=True)
+    owner_token = Column(String, nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Telegram VIP outbox (2026-09-27) -- durable outbound delivery for
+# telegram_vip_router.py, added after an audit proved the pilot's original
+# "commit DB, then best-effort adapter.send()" design loses replies: a
+# transient Telegram API failure OR a process crash between the atomic
+# commit and the send loop leaves NOTHING durable to recover from (nothing
+# was ever persisted -- pending_sends was a plain in-memory list). See
+# services/telegram_outbox.py's module docstring for the full state machine,
+# which mirrors services/whatsapp_outbox.py's (OutboundMessageDB/
+# OutboundMessageStatus) with one simplification: Telegram's Bot API
+# sendMessage response IS the definitive synchronous outcome (200 = sent,
+# non-2xx/exception = not sent) -- there is no separate asynchronous
+# delivery-status webhook to correlate later, so SENT is the terminal
+# success state (no META_ACCEPTED/DELIVERED split).
+# ---------------------------------------------------------------------------
+
+
+class TelegramOutboundMessageStatus(str, Enum):
+    """Revision 2026-09-27 (second correction, "última corrección antes de
+    cerrar un commit local"): FAILED_PERMANENT added, distinct from
+    FAILED_TERMINAL. FAILED_PERMANENT is reached on the FIRST attempt that
+    gets a definitive, known-permanent rejection (HTTP 400/401/403 -- see
+    messaging/telegram_adapter.TelegramApiPermanentError) -- no retry is
+    EVER attempted, because we know from the response itself that retrying
+    the identical request cannot succeed. FAILED_TERMINAL is reached only
+    after a TRANSIENT failure (429/5xx, TelegramApiTransientError) has
+    been retried until WHATSAPP_VIP_OUTBOX_MAX_ATTEMPTS is exhausted --
+    a genuinely different history, kept as a genuinely different terminal
+    state so an operator scanning the outbox can tell "never going to
+    work" apart from "we gave up after N honest tries"."""
+
+    PENDING = "pending"
+    SENDING = "sending"
+    SENT = "sent"
+    FAILED_RETRYABLE = "failed_retryable"
+    FAILED_TERMINAL = "failed_terminal"
+    FAILED_PERMANENT = "failed_permanent"
+    UNCERTAIN_NEEDS_RECONCILIATION = "uncertain_needs_reconciliation"
+
+
+class TelegramOutboundMessageDB(Base):
+    """The Telegram counterpart of OutboundMessageDB -- every VIP-flow
+    outbound Telegram reply is persisted here BEFORE being attempted, in the
+    SAME atomic commit as the wizard/session-state advance and the webhook
+    idempotency marker (see routers/telegram.py's
+    _handle_telegram_vip_message_atomically and
+    telegram_vip_router.py's _send/handle_inbound)."""
+
+    __tablename__ = "telegram_outbound_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_chat_id = Column(String, nullable=False, index=True)
+    body_text = Column(String, nullable=False)
+    status = Column(SQLEnum(TelegramOutboundMessageStatus, create_constraint=True, validate_strings=True), nullable=False, default=TelegramOutboundMessageStatus.PENDING, index=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(String, nullable=True)  # sanitized only -- exception type + HTTP status_code + Telegram's own numeric error_code, never a raw response body or the bot_token
+    source_message_id = Column(String, nullable=True, index=True)  # the inbound Telegram message_id that caused this reply, for observability only
+    created_at = Column(DateTime(timezone=True), default=timeutils.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=timeutils.utcnow, onupdate=timeutils.utcnow)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True, index=True)

@@ -93,5 +93,39 @@ class Settings(BaseSettings):
     # que WALLET_HANDOFF_ENABLED tenga algun efecto util.
     DAPP_BASE_URL: str = "http://localhost:5173/app"
 
+    # WhatsApp VIP offer-board pilot -- see messaging/whatsapp_vip_router.py
+    # and services/whatsapp_outbox.py. Completely separate from the wallet/
+    # escrow settings above -- the VIP flow never reads or sets
+    # WALLET_HANDOFF_ENABLED/DAPP_BASE_URL, and never touches P2POrderDB.
+    # Inbound rate limiting reuses the existing per-whatsapp_id
+    # RATE_LIMIT_WHATSAPP_MESSAGE_PER_MINUTE limiter already enforced in
+    # routers/whatsapp.py for every inbound message -- no separate
+    # VIP-specific limit is needed.
+    # Periodic outbox sweep: retries PENDING/FAILED_RETRYABLE outbound
+    # replies while the process is running, not just once at startup (see
+    # services/whatsapp_outbox.py's module docstring for the full design).
+    # False in tests (set via conftest.py) to keep the suite fast/deterministic;
+    # tests call flush_pending_outbound() directly and synchronously instead.
+    WHATSAPP_VIP_OUTBOX_AUTOSTART: bool = True
+    WHATSAPP_VIP_OUTBOX_POLL_SECONDS: int = 15
+    WHATSAPP_VIP_OUTBOX_MAX_ATTEMPTS: int = 6
+    # A row stuck in SENDING longer than this is treated as an AMBIGUOUS
+    # outcome (process may have crashed between "sent to Meta" and "recorded
+    # the result") -- moved to UNCERTAIN_NEEDS_RECONCILIATION, never
+    # auto-retried (see services/whatsapp_outbox.py).
+    WHATSAPP_VIP_OUTBOX_STUCK_SECONDS: int = 30
+    WHATSAPP_VIP_OUTBOX_LEASE_SECONDS: int = 20
+
+    # Telegram-as-source-of-truth VIP pilot (2026-09-27) -- see
+    # messaging/telegram_vip_router.py. None by default on purpose: the
+    # t.me/<bot>?start=offer_<id> deep link this pilot generates for the
+    # operator to copy into the WhatsApp VIP group is worthless (or
+    # actively wrong) if it points at a placeholder/guessed username, so
+    # telegram_vip_router.validate_telegram_bot_username() refuses to build
+    # a link at all while this is unset or malformed -- it never fabricates
+    # one. Must be the bot's real @username (without the leading @), set by
+    # whoever registered the bot with @BotFather.
+    TELEGRAM_VIP_BOT_USERNAME: str | None = None
+
 
 settings = Settings()

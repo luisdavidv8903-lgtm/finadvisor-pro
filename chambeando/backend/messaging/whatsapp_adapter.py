@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import uuid
 from abc import ABC, abstractmethod
 
 from .adapter import MessagingAdapter, OutboundMessage
@@ -35,6 +36,18 @@ class MetaClient(ABC):
     @abstractmethod
     def send_message(self, to: str, text: str) -> None: ...
 
+    def send_message_with_id(self, to: str, text: str) -> str | None:
+        """Same transport as send_message, but returns Meta's message id
+        (wamid) on success -- used only by the VIP outbox
+        (services/whatsapp_outbox.py) to correlate future delivery-status
+        webhooks. Default implementation (used by any MetaClient subclass
+        that doesn't override this, e.g. a test fake that only implements
+        send_message) just calls send_message and reports 'no id available'
+        -- never raises on its own, never invents an id. SandboxMetaClient
+        and MetaCloudWhatsAppClient both override this with a real id."""
+        self.send_message(to, text)
+        return None
+
 
 class SandboxMetaClient(MetaClient):
     """In-memory fake -- never makes an HTTP call. `sent` is a plain list a
@@ -45,6 +58,10 @@ class SandboxMetaClient(MetaClient):
 
     def send_message(self, to: str, text: str) -> None:
         self.sent.append((to, text))
+
+    def send_message_with_id(self, to: str, text: str) -> str:
+        self.send_message(to, text)
+        return f"sandbox-wamid-{uuid.uuid4().hex}"
 
 
 class MetaApiError(Exception):
@@ -93,7 +110,7 @@ class MetaCloudWhatsAppClient(MetaClient):
             self._http = httpx.Client(timeout=self._timeout_seconds)
         return self._http
 
-    def send_message(self, to: str, text: str) -> None:
+    def _post_message(self, to: str, text: str):
         import httpx
 
         url = f"{self._base_url}/{self._phone_number_id}/messages"
@@ -124,6 +141,25 @@ class MetaCloudWhatsAppClient(MetaClient):
             # only in `headers` above, never passed to this logger call).
             logger.error("WhatsApp send failed: status=%s error_code=%s", response.status_code, error_code)
             raise MetaApiError(f"Meta API returned HTTP {response.status_code}")
+        return response
+
+    def send_message(self, to: str, text: str) -> None:
+        self._post_message(to, text)
+
+    def send_message_with_id(self, to: str, text: str) -> str | None:
+        """Returns the real Meta message id (`messages[0].id`, e.g.
+        'wamid.HBg...') on a clean 2xx response. A malformed/unexpected
+        success body (no 'messages' array) is NOT an error -- Meta did
+        accept the HTTP request -- but there is no id to report, so this
+        returns None rather than guessing or raising; the outbox treats
+        that the same as any other "accepted but nothing to correlate"
+        case (see services/whatsapp_outbox.py)."""
+        response = self._post_message(to, text)
+        try:
+            return response.json()["messages"][0]["id"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            logger.error("WhatsApp send succeeded (2xx) but no message id found in the response body")
+            return None
 
     def close(self) -> None:
         if self._owns_client and self._http is not None:

@@ -22,6 +22,12 @@ os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP_DB_DIR}/unused-module-le
 # Tests covering the fail-closed behavior itself monkeypatch back to the
 # public default explicitly (see test_whatsapp_webhook_security.py).
 os.environ.setdefault("WHATSAPP_APP_SECRET", "test-only-whatsapp-app-secret-" + uuid.uuid4().hex)
+# Keep the VIP outbox's background asyncio sweep loop OFF during tests --
+# main.py's startup hook checks this before spawning it. Tests call
+# flush_pending_outbound()/attempt_send_one() directly and synchronously
+# instead (see test_whatsapp_vip_outbox.py), which is faster and
+# deterministic (no sleep-based polling in the suite).
+os.environ.setdefault("WHATSAPP_VIP_OUTBOX_AUTOSTART", "false")
 
 from cryptography.fernet import Fernet  # noqa: E402
 

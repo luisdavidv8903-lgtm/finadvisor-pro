@@ -152,3 +152,29 @@ def parse_meta_webhook_envelope(envelope: MetaWebhookEnvelope) -> list[Normalize
                 normalized.append(NormalizedInboundMessage(message_id=message.id, whatsapp_id=message.from_wa_id, text=text))
             # change.value.statuses are deliberately never converted to inbound messages
     return normalized
+
+
+@dataclass(frozen=True)
+class NormalizedStatusUpdate:
+    """A delivery-status callback for a message WE sent (sent/delivered/read/
+    failed), keyed by the SAME wamid Meta gave us when we sent it. Used only
+    by the VIP outbox (services/whatsapp_outbox.py) to upgrade an outbox
+    row's status to DELIVERED/FAILED when Meta actually confirms it -- never
+    treated as conversational input (see parse_meta_webhook_envelope above)."""
+
+    wamid: str
+    status: str
+
+
+def parse_meta_webhook_statuses(envelope: MetaWebhookEnvelope) -> list[NormalizedStatusUpdate]:
+    """The `statuses` counterpart of parse_meta_webhook_envelope -- additive,
+    does not change that function's behavior. Safely skips a status entry
+    with no id (nothing to correlate against)."""
+    normalized: list[NormalizedStatusUpdate] = []
+    for entry in envelope.entry:
+        for change in entry.changes:
+            for status in change.value.statuses:
+                if not status.id:
+                    continue
+                normalized.append(NormalizedStatusUpdate(wamid=status.id, status=status.status))
+    return normalized

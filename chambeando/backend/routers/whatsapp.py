@@ -19,18 +19,70 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import get_authenticated_network, get_current_user
-from ..messaging import get_conversation_router
+from ..messaging import get_conversation_router, get_whatsapp_vip_router
 from ..messaging.identity import LinkTokenError, consume_link_token
-from ..messaging.meta_envelope import MetaWebhookEnvelope, parse_meta_webhook_envelope
+from ..messaging.meta_envelope import MetaWebhookEnvelope, parse_meta_webhook_envelope, parse_meta_webhook_statuses
 from ..messaging.whatsapp_adapter import verify_webhook_signature, verify_webhook_subscription, webhook_signature_check_is_trustworthy
-from ..models import ProcessedWebhookEventDB, SecurityEventType, UserDB
+from ..messaging.whatsapp_vip_router import WhatsAppVipRouter
+from ..models import Channel, ChannelIdentityDB, OutboundMessageDB, ProcessedWebhookEventDB, SecurityEventType, UserDB, VipWizardState, WhatsAppVipSessionDB
 from ..schemas import WhatsAppLinkRequest, WhatsAppLinkResponse
 from ..security.audit import log_security_event
 from ..security.rate_limit import RateLimiter, enforce_rate_limit, get_rate_limiter
+from ..services import whatsapp_outbox
 
 logger = logging.getLogger("chambeando.whatsapp")
 
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
+
+_VIP_TOP_LEVEL_COMMANDS = {"OFERTA", "OFERTAS", "MIS OFERTAS", "MISOFERTAS"}
+_VIP_PREFIXES = ("VIP ", "ME INTERESA", "CERRAR")
+
+
+def _is_vip_message(db: Session, whatsapp_id: str, text: str) -> bool:
+    """Routes a message to the VIP offer-board flow (whatsapp_vip_router.py)
+    instead of the wallet/escrow ConversationRouter -- by command keyword, OR
+    because this whatsapp_id is mid-wizard (a numeric/free-text answer to a
+    guided question would otherwise fall through to the wrong router's
+    "No entendi ese mensaje" instead of continuing the wizard)."""
+    upper = (text or "").strip().upper()
+    if upper in _VIP_TOP_LEVEL_COMMANDS or upper.startswith(_VIP_PREFIXES):
+        return True
+    identity = db.query(ChannelIdentityDB).filter(ChannelIdentityDB.channel == Channel.WHATSAPP, ChannelIdentityDB.channel_user_id == whatsapp_id).first()
+    if identity is None:
+        return False
+    session = db.query(WhatsAppVipSessionDB).filter(WhatsAppVipSessionDB.channel_identity_id == identity.id).first()
+    return session is not None and session.state != VipWizardState.IDLE
+
+
+def _handle_vip_message_atomically(db: Session, vip_router: WhatsAppVipRouter, whatsapp_id: str, text: str, message_id: str) -> tuple[bool, list[OutboundMessageDB]]:
+    """The atomic unit for one VIP inbound message: the wizard/session state
+    advance, every outbox PENDING row it staged, and the webhook idempotency
+    marker -- committed together, exactly once (revision 2026-09-27 audit
+    finding; see whatsapp_vip_router.py's module docstring for the full
+    rationale). Meta is never called in here.
+
+    Returns (won, pending_sends). won=False means this call's commit lost a
+    race to a concurrent delivery of the SAME message_id that got there
+    first (IntegrityError on the marker's unique constraint) -- everything
+    THIS call staged (state advance included) is rolled back with it, never
+    a partial duplicate. Any other exception is also rolled back before
+    propagating, exactly like a real process crash: nothing of this attempt
+    survives, so a redelivery replays cleanly from the unchanged prior
+    state. Extracted as its own function (rather than inlined in
+    receive_webhook) so it can be exercised directly -- with two independent
+    DB sessions on two real threads -- by the concurrency tests, without
+    going through the HTTP layer."""
+    try:
+        pending_sends = vip_router.handle_inbound(db, whatsapp_id, text, message_id=message_id)
+        db.add(ProcessedWebhookEventDB(provider="whatsapp", message_id=message_id))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return False, []
+    except Exception:
+        db.rollback()
+        raise
+    return True, pending_sends
 
 
 @router.get("/webhook")
@@ -81,38 +133,78 @@ async def receive_webhook(
         raise HTTPException(status_code=400, detail="Payload de webhook invalido")
 
     # `statuses` (delivery/read receipts for messages WE sent) live in the
-    # SAME envelope but are never surfaced here — parse_meta_webhook_envelope
-    # only ever returns genuine inbound user messages, never a status event
-    # mistaken for one (section 6).
+    # SAME envelope -- never converted into inbound conversational input
+    # (parse_meta_webhook_envelope), but the VIP outbox DOES want them to
+    # correlate delivery confirmation (parse_meta_webhook_statuses, below).
     inbound_messages = parse_meta_webhook_envelope(envelope)
 
     router_instance = get_conversation_router()
+    vip_router_instance = get_whatsapp_vip_router()
     processed = 0
     duplicates = 0
 
     for message in inbound_messages:
         enforce_rate_limit(limiter, f"whatsapp-inbound:{message.whatsapp_id}", settings.RATE_LIMIT_WHATSAPP_MESSAGE_PER_MINUTE)
 
-        # DB-ENFORCED idempotency: the unique constraint on (provider, message_id)
-        # is the actual guarantee, not this Python check -- a genuine race
-        # between two webhook deliveries for the same message_id still can't
-        # both win (see models.py's ProcessedWebhookEventDB docstring). Meta's
-        # own message id (wamid...) is the external idempotency key, exactly
-        # as section 6 specifies -- no separate id is generated here.
-        event = ProcessedWebhookEventDB(provider="whatsapp", message_id=message.message_id)
-        db.add(event)
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
+        # Fast-path duplicate check ONLY -- NOT the real guarantee (see
+        # below). A message already marked processed is skipped without
+        # re-running the handler or re-sending a reply.
+        already_processed = (
+            db.query(ProcessedWebhookEventDB)
+            .filter(ProcessedWebhookEventDB.provider == "whatsapp", ProcessedWebhookEventDB.message_id == message.message_id)
+            .first()
+            is not None
+        )
+        if already_processed:
             duplicates += 1
             logger.info("whatsapp webhook: duplicate message_id, skipped")
             continue
 
-        router_instance.handle_inbound(db, message.whatsapp_id, message.text)
+        if _is_vip_message(db, message.whatsapp_id, message.text):
+            # See _handle_vip_message_atomically's docstring and
+            # whatsapp_vip_router.py's module docstring: the wizard/session
+            # state advance, every outbox row it staged, and the marker
+            # below all land in ONE commit, and Meta is only ever called
+            # AFTER that commit succeeds -- for exactly the rows THIS call
+            # staged, never a blind resend of anything already in the
+            # outbox from an earlier message.
+            won, pending_sends = _handle_vip_message_atomically(db, vip_router_instance, message.whatsapp_id, message.text, message.message_id)
+            if not won:
+                duplicates += 1
+                logger.info("whatsapp webhook: duplicate message_id, skipped")
+                continue
+            for row in pending_sends:
+                whatsapp_outbox.attempt_send_one(db, row, vip_router_instance.meta_client)
+        else:
+            # Legacy wallet/escrow flow -- deliberately UNCHANGED by this
+            # fix, out of scope (ConversationRouter.handle_inbound commits
+            # internally as it goes, same as telegram_router.py/router.py,
+            # and the marker below is a SEPARATE, later commit). The known
+            # limit this leaves in place: a crash between that internal
+            # commit and the marker commit below is safe for THIS flow only
+            # because every wallet-side mutation it can trigger is already
+            # independently idempotent by its own DB constraint (same
+            # reasoning VIP's create_offer/register_interest/close_offer
+            # rely on) -- there is no multi-step numeric wizard on this side
+            # for an intermediate answer to be misapplied to.
+            router_instance.handle_inbound(db, message.whatsapp_id, message.text)
+            event = ProcessedWebhookEventDB(provider="whatsapp", message_id=message.message_id)
+            db.add(event)
+            try:
+                db.commit()
+            except IntegrityError:
+                # Lost a race with a concurrent delivery of the same
+                # message_id that finished first -- our own handler run
+                # already completed safely (idempotent, see above); nothing
+                # left to do.
+                db.rollback()
         processed += 1
 
-    logger.info("whatsapp webhook: processed=%s duplicates=%s", processed, duplicates)
+    status_updates = parse_meta_webhook_statuses(envelope)
+    for status_update in status_updates:
+        whatsapp_outbox.apply_status_update(db, status_update.wamid, status_update.status)
+
+    logger.info("whatsapp webhook: processed=%s duplicates=%s status_updates=%s", processed, duplicates, len(status_updates))
     return {"processed": processed, "duplicates": duplicates}
 
 
